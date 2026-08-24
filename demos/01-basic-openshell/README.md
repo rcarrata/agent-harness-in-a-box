@@ -9,6 +9,10 @@ Install OpenShell gateway on OpenShift with no authentication. This is the simpl
 - How the gateway manages sandbox lifecycle through the Agent Sandbox CRD
 - How to create, connect to, and manage sandboxes
 
+## What You'll Build
+
+By the end of this demo you will have an OpenShell gateway running on OpenShift, exposed via an OpenShift Route. You will connect the `openshell` CLI from your workstation and create your first sandboxed runtime. The sandbox enforces network default-deny via a CONNECT proxy, Landlock filesystem isolation, and process isolation - even without installing any AI agent or model.
+
 ## Architecture
 
 ```
@@ -27,10 +31,12 @@ The gateway runs as a StatefulSet with a 1Gi PVC for its SQLite database. It cre
 
 ## Prerequisites
 
-- OpenShift 4.19+ cluster with cluster-admin access
+- OpenShift 4.19+ cluster with cluster-admin access (tested on 4.20, 4.21)
 - `oc` CLI configured and logged in
 - Helm 3.x installed
-- `openshell` CLI installed on your workstation
+- `openshell` CLI v0.0.85+ installed on your workstation
+
+> **CRD source:** This demo installs the [Red Hat build of Agent Sandbox](https://docs.redhat.com/en/documentation/openshift_sandboxed_containers/1.12/html/deploying_red_hat_build_of_agent_sandbox/) operator via OLM (channel `preview-0.9`). The upstream [kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) CRDs also work if you prefer a manual install.
 
 ### Install the openshell CLI
 
@@ -57,6 +63,15 @@ ENABLE_TLS=true bash install.sh
 
 This runs all steps below automatically. Continue reading for the manual walkthrough.
 
+### Environment Variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `NAMESPACE` | `openshell` | OpenShift namespace for all resources |
+| `OPENSHELL_VERSION` | *(latest)* | Pin a specific Helm chart version |
+| `ENABLE_TLS` | `false` | Enable passthrough TLS via cert-manager |
+| `LITELLM_URL` | `https://maas-rhdp.apps.maas.redhatworkshops.io` | LiteLLM endpoint used in security tests |
+
 ### TLS Mode (Optional)
 
 By default the gateway runs without TLS, and sandbox operations (create, exec, connect) go through `oc port-forward` to avoid gRPC trailer issues with OpenShift routes.
@@ -71,6 +86,8 @@ Setting `ENABLE_TLS=true` enables passthrough TLS via cert-manager:
 
 **Why:** OpenShift HAProxy strips gRPC trailers from H2C, edge, and re-encrypt routes. Passthrough TLS is the only route type that preserves them. Without TLS, you need port-forward.
 
+Use `ENABLE_TLS=true` for production-like setups. Use the default (no TLS) for quick evaluation where port-forward is acceptable.
+
 **TLS prerequisites:**
 - cert-manager on the cluster. The install script auto-installs the [Red Hat cert-manager operator](https://github.com/redhat-cop/gitops-catalog/tree/main/openshift-cert-manager-operator) via OLM if CRDs are not already present. To install manually:
   ```bash
@@ -79,20 +96,33 @@ Setting `ENABLE_TLS=true` enables passthrough TLS via cert-manager:
 
 ## Step-by-Step Guide
 
-### Step 1: Install Agent Sandbox CRDs
+### Step 1: Install the Agent Sandbox Operator
 
-The Agent Sandbox project (kubernetes-sigs/agent-sandbox) provides the `Sandbox` custom resource definition that OpenShell uses to manage sandbox pod lifecycle.
+The Red Hat build of Agent Sandbox provides the `Sandbox` custom resource definition that OpenShell uses to manage sandbox pod lifecycle. Install it via OLM:
 
 ```bash
-oc apply -f \
-    https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/manifest.yaml
+cat <<'EOF' | oc apply -f -
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: agent-sandbox-operator
+  namespace: openshift-operators
+spec:
+  channel: preview-0.9
+  installPlanApproval: Automatic
+  name: agent-sandbox-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+EOF
 ```
 
-Wait for the controller to be ready:
+Wait for the operator CSV to succeed:
 
 ```bash
-oc -n agent-sandbox-system wait --for=condition=Ready pod \
-    -l control-plane=controller-manager --timeout=120s
+CSV=$(oc -n openshift-operators get subscription agent-sandbox-operator \
+    -o jsonpath='{.status.installedCSV}')
+oc -n openshift-operators wait --for=jsonpath='{.status.phase}'=Succeeded \
+    csv/"$CSV" --timeout=300s
 ```
 
 Verify the CRD exists:
@@ -239,6 +269,16 @@ You can also run the automated verification:
 bash verify.sh
 ```
 
+### Monitor Live Events
+
+Use `openshell term` to watch sandbox events in real-time:
+
+```bash
+openshell term
+```
+
+This streams OCSF-formatted events showing sandbox creation, command execution, network policy enforcement (ALLOWED/DENIED), and more. Leave it running in a second terminal while testing sandbox security.
+
 ### Step 10: Create your first sandbox
 
 **Quick test (run a command and exit):**
@@ -341,7 +381,9 @@ Remove everything installed by this demo:
 bash teardown.sh
 ```
 
-To also remove the Agent Sandbox CRDs (only if no other demo is using them):
+This removes: Helm release, Route, JWT signing secret, PVC (SQLite data), SCC binding, and the namespace.
+
+To also remove the Agent Sandbox operator (only if no other demo is using it):
 
 ```bash
 bash teardown.sh --crd
@@ -350,22 +392,44 @@ bash teardown.sh --crd
 ## Troubleshooting
 
 **Gateway pod stuck in Pending:**
-Check if the PVC is bound. The gateway needs a 1Gi PVC for its SQLite database.
+Check if the PVC is bound. The gateway needs a 1Gi PVC for its SQLite database. Also verify a default StorageClass exists.
 ```bash
 oc -n openshell get pvc
+oc get storageclass
 ```
 
 **SCC errors on sandbox pods:**
-Verify the SCC binding:
+Verify the SCC binding was applied before Helm install:
 ```bash
-oc get clusterrolebinding | grep openshell-sandbox
 oc adm policy who-can use scc privileged -n openshell
 ```
 
 **Route not resolving:**
 Verify the Route was created and has a host assigned:
 ```bash
-oc -n openshell get route openshell-gw -o yaml
+oc -n openshell get route openshell-gw -o jsonpath='{.spec.host}'
+```
+
+**`missing grpc-status trailer` or gRPC errors:**
+OpenShift HAProxy strips gRPC trailers from H2C, edge, and re-encrypt routes. Use `ENABLE_TLS=true` for passthrough TLS, or use `oc port-forward` to bypass the route entirely.
+
+**openshell CLI `connection refused` or `Disconnected`:**
+Verify the route URL matches what you registered. Check `openshell gateway list` and compare with `oc get route`. For TLS mode, make sure you used `https://` and `--gateway-insecure`.
+
+**Sandbox stuck in `Creating` state:**
+Check sandbox pod events for image pull or SCC issues:
+```bash
+oc -n openshell get pods
+oc -n openshell describe pod -l app.kubernetes.io/component=sandbox
+```
+
+**`openssl: command not found` or Ed25519 errors (macOS):**
+macOS ships LibreSSL which does not support Ed25519. Install OpenSSL 3.x via Homebrew: `brew install openssl@3`. The install script auto-detects Homebrew OpenSSL.
+
+**cert-manager not installing (TLS mode):**
+Check the OLM catalog source is available:
+```bash
+oc get catalogsource -n openshift-marketplace
 ```
 
 ## What's Next

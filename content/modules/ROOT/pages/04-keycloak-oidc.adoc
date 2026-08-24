@@ -1,0 +1,246 @@
+= Phase 4: {rhbk} OIDC
+
+Deploy {rhbk} on {ocp-short} and configure OIDC authentication for the {openshell} gateway.
+
+TIP: All file paths and script commands in this guide are relative to the link:{repo-url}[agent-harness-in-a-box] repository root.
+
+IMPORTANT: This guide is not a replacement for the link:https://docs.nvidia.com/openshell/latest/[official {openshell} documentation^].
+
+== Overview
+
+In xref:02-gateway-deployment.adoc[Phase 2] the gateway was deployed with `allowUnauthenticatedUsers=true`. This phase adds OIDC authentication via {rhbk}, so users must log in before accessing sandboxes.
+
+The OIDC flow works as follows:
+
+. The `openshell` CLI opens a browser to the {rhbk} login page
+. User authenticates with username/password (local {rhbk} users)
+. {rhbk} issues a signed JWT with `realm_access.roles` containing `openshell-admin` or `openshell-user`
+. The CLI presents the JWT as a Bearer token on every gRPC call
+. The gateway validates the JWT against {rhbk}'s JWKS endpoint (in-cluster URL)
+
+[source]
+----
++--------------+    OIDC     +------------------+
+|              +------------>+                  |
+| openshell    |    login    |  Keycloak        |
+| CLI          +<------------+  (OIDC Provider) |
+|              |    JWT      |                  |
++------+-------+             +------------------+
+       |
+       | gRPC + Bearer token
+       v
++------+----------+         +-------------------+
+|                  | creates |                   |
+| OpenShell        +-------->+ Sandbox Pods      |
+| Gateway          |         |                   |
+| (validates JWT)  |         |                   |
++------------------+         +-------------------+
+----
+
+== Prerequisites
+
+* Phases 1-3 completed (gateway running, CLI configured)
+* `oc` CLI authenticated as cluster-admin
+* Working directory: `demos/02-opencode-keycloak/`
+
+== Installation
+
+=== Step 1: Deploy {rhbk}
+
+Create the namespace and apply all {rhbk} manifests:
+
+[source,bash]
+----
+oc apply -f manifests/keycloak/namespace.yaml
+oc apply -f manifests/keycloak/realm-configmap.yaml
+oc apply -f manifests/keycloak/deployment.yaml
+oc apply -f manifests/keycloak/service.yaml
+----
+
+Wait for {rhbk} to be ready (30-60 seconds to start and import the realm):
+
+[source,bash]
+----
+oc -n openshell-keycloak rollout status deployment/keycloak --timeout=120s
+----
+
+{rhbk} starts in `start-dev` mode with an H2 in-memory database. The `--import-realm` flag imports the realm JSON from the mounted ConfigMap.
+
+=== Step 2: Expose {rhbk}
+
+Create a Route for the admin console and OIDC endpoints:
+
+[source,bash]
+----
+oc apply -f manifests/keycloak/route.yaml
+----
+
+Verify the OIDC discovery endpoint responds:
+
+[source,bash]
+----
+KC_ROUTE=$(oc -n openshell-keycloak get route keycloak -o jsonpath='{.spec.host}')
+curl -sk "https://$KC_ROUTE/realms/openshell/.well-known/openid-configuration" | python3 -m json.tool | head -10
+----
+
+You should see a JSON response with `issuer`, `authorization_endpoint`, `token_endpoint`, and other OIDC endpoints.
+
+=== Step 3: Pre-configured Realm
+
+The realm imported at startup includes:
+
+[cols="1,3", options="header"]
+|===
+| Resource | Details
+
+| Realm
+| `openshell`
+
+| Roles
+| `openshell-admin` (full access), `openshell-user` (standard access)
+
+| Client `openshell-cli`
+| Public client with PKCE (for interactive CLI login)
+
+| Client `openshell-ci`
+| Confidential client (for CI/automation)
+
+| User `admin@test`
+| Password: `admin` - has both admin and user roles
+
+| User `user@test`
+| Password: `user` - has user role only
+|===
+
+To add custom users, log in at `https://<KC_ROUTE>` with `admin`/`admin` and navigate to the `openshell` realm.
+
+=== Step 4: Reinstall {openshell} with OIDC
+
+Install using the {rhbk} values overlay, which includes both {ocp-short} overrides and OIDC configuration:
+
+[source,bash]
+----
+helm upgrade --install openshell oci://ghcr.io/nvidia/openshell/helm-chart \
+    --namespace openshell \
+    -f manifests/openshell/values-keycloak.yaml
+----
+
+Wait for the gateway to restart:
+
+[source,bash]
+----
+oc -n openshell rollout status statefulset/openshell --timeout=300s
+----
+
+The OIDC configuration connects the gateway to {rhbk}:
+
+[cols="1,2,2", options="header"]
+|===
+| Setting | Value | Purpose
+
+| `oidc.issuer`
+| `http://keycloak.openshell-keycloak.svc.cluster.local/realms/openshell`
+| In-cluster {rhbk} URL (tokens carry this as `iss`)
+
+| `oidc.audience`
+| `openshell-cli`
+| Must match the client ID in {rhbk}
+
+| `oidc.rolesClaim`
+| `realm_access.roles`
+| Where {rhbk} puts roles in the JWT
+
+| `oidc.adminRole`
+| `openshell-admin`
+| Maps to {rhbk} realm role
+
+| `oidc.userRole`
+| `openshell-user`
+| Maps to {rhbk} realm role
+|===
+
+=== Step 5: Register the Gateway with OIDC
+
+[source,bash]
+----
+GW_URL="http://$(oc -n openshell get route openshell-gw -o jsonpath='{.spec.host}')"
+
+openshell gateway add "$GW_URL" \
+    --name openshift \
+    --oidc-issuer "http://keycloak.openshell-keycloak.svc.cluster.local/realms/openshell" \
+    --oidc-client-id "openshell-cli"
+----
+
+=== Step 6: Authenticate
+
+The CLI needs to reach {rhbk} to perform the OIDC login. Since the issuer is an in-cluster URL, set up a port-forward:
+
+[source,bash]
+----
+# In a separate terminal
+oc -n openshell-keycloak port-forward svc/keycloak 9090:80
+----
+
+Then login:
+
+[source,bash]
+----
+openshell gateway login openshift
+----
+
+This opens your browser to the {rhbk} login page. Log in with `admin@test` / `admin` (or `user@test` / `user`).
+
+== Verification
+
+[source,bash]
+----
+openshell status
+----
+
+This should show the gateway connection details with your authenticated user.
+
+[source,bash]
+----
+bash verify.sh
+----
+
+== Troubleshooting
+
+*"PermissionDenied" when accessing the gateway:*
+
+The OIDC token does not have the required roles. Check that the user has `openshell-admin` or `openshell-user` role in {rhbk}, and that the `rolesClaim` in Helm values matches {rhbk}'s token structure (`realm_access.roles`).
+
+*"issuer mismatch" or token validation errors:*
+
+The `iss` claim in the JWT must exactly match the `oidc.issuer` in the Helm values. Both must use the in-cluster {rhbk} service hostname:
+
+----
+http://keycloak.openshell-keycloak.svc.cluster.local/realms/openshell
+----
+
+*Cannot reach {rhbk} for CLI login:*
+
+The OIDC issuer URL points to an in-cluster hostname. You need a port-forward for the CLI to reach it:
+
+[source,bash]
+----
+oc -n openshell-keycloak port-forward svc/keycloak 9090:80
+----
+
+*{rhbk} pod not starting:*
+
+Check the logs for realm JSON syntax errors or resource limits (needs at least 512Mi):
+
+[source,bash]
+----
+oc -n openshell-keycloak logs deployment/keycloak
+----
+
+== References
+
+* link:https://docs.nvidia.com/openshell/latest/kubernetes/access-control[{openshell} Access Control^]
+* link:https://www.keycloak.org/documentation[{rhbk} Documentation^]
+
+== Next step
+
+Proceed to xref:05-opencode-agent.adoc[Phase 5: OpenCode Agent].

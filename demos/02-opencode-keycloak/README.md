@@ -169,15 +169,29 @@ oc apply -f manifests/keycloak/realm-configmap.yaml
 oc -n openshell-keycloak rollout restart deployment/keycloak
 ```
 
-### Step 5: Install Agent Sandbox CRDs
+### Step 5: Install the Agent Sandbox Operator
 
-If you already completed Demo 1, skip this step.
+If you already completed Demo 1, skip this step. The install script detects the CRD and skips this automatically.
 
 ```bash
-oc apply -f \
-    https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/manifest.yaml
-oc -n agent-sandbox-system wait --for=condition=Ready pod \
-    -l control-plane=controller-manager --timeout=120s
+cat <<'EOF' | oc apply -f -
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: agent-sandbox-operator
+  namespace: openshift-operators
+spec:
+  channel: preview-0.9
+  installPlanApproval: Automatic
+  name: agent-sandbox-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+EOF
+
+CSV=$(oc -n openshift-operators get subscription agent-sandbox-operator \
+    -o jsonpath='{.status.installedCSV}')
+oc -n openshift-operators wait --for=jsonpath='{.status.phase}'=Succeeded \
+    csv/"$CSV" --timeout=300s
 ```
 
 ### Step 6: Configure OpenShift for OpenShell

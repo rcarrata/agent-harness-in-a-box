@@ -1,0 +1,220 @@
+= Phase 2: Gateway Deployment
+
+Deploy the {openshell} gateway on {ocp-short} via Helm.
+
+TIP: All file paths and script commands in this guide are relative to the link:{repo-url}[agent-harness-in-a-box] repository root.
+
+IMPORTANT: This guide is not a replacement for the link:https://docs.nvidia.com/openshell/latest/[official {openshell} documentation^].
+
+== Overview
+
+The {openshell} gateway runs as a StatefulSet with a 1Gi PVC for its SQLite database. It creates and manages sandbox pods through the Agent Sandbox CRD. The `openshell` CLI communicates with the gateway via gRPC, exposed through an {ocp-short} Route.
+
+[source]
+----
++------------------+       +-----------------------+       +------------------+
+|                  |  gRPC |                       |  K8s  |                  |
+|  openshell CLI   +------>+  OpenShell Gateway     +------>+  Sandbox Pods    |
+|  (workstation)   |       |  (StatefulSet)         |       |  (Agent Sandbox) |
+|                  |       |                       |       |                  |
++------------------+       +-----------+-----------+       +------------------+
+                                       |
+                                  OpenShift
+                                  Route (HTTP)
+----
+
+== Installation
+
+=== Step 1: Create the Namespace
+
+All {openshell} resources (gateway, sandbox pods) will run in this namespace.
+
+[source,bash]
+----
+oc create ns openshell
+----
+
+=== Step 2: Configure Security Context Constraints
+
+Sandbox pods need the `privileged` SCC because the {openshell} supervisor (which runs inside each sandbox pod as PID 1) sets up:
+
+* *Landlock* - Filesystem access control (restricts which paths the agent can read/write)
+* *Seccomp* - System call filtering (blocks dangerous syscalls)
+* *Network namespacing* - Runs an HTTP CONNECT proxy to enforce network policy
+
+These security mechanisms require elevated privileges at startup, even though the actual agent process runs as the unprivileged `sandbox` user.
+
+[source,bash]
+----
+oc adm policy add-scc-to-user privileged \
+    -z openshell-sandbox -n openshell
+----
+
+The `openshell-sandbox` ServiceAccount is created by the Helm chart and is used by sandbox pods (not the gateway pod itself).
+
+=== Step 3: Create JWT Signing Keys
+
+The {openshell} gateway uses Ed25519 JWT tokens for sandbox-to-gateway authentication. The Helm chart includes a PKI init Job that generates these keys, but that Job is not compatible with {ocp-short}'s SCC admission controller.
+
+Create the keys manually instead:
+
+[source,bash]
+----
+# Generate Ed25519 keypair
+openssl genpkey -algorithm Ed25519 -out /tmp/jwt-signing.pem
+openssl pkey -in /tmp/jwt-signing.pem -pubout -out /tmp/jwt-public.pem
+
+# Generate a key ID (KID) from the public key fingerprint
+KID=$(openssl pkey -in /tmp/jwt-signing.pem -pubout -outform DER \
+    | openssl dgst -sha256 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+echo "$KID" > /tmp/jwt-kid.txt
+
+# Create the Kubernetes secret
+oc -n openshell create secret generic openshell-jwt-keys \
+    --from-file=signing.pem=/tmp/jwt-signing.pem \
+    --from-file=public.pem=/tmp/jwt-public.pem \
+    --from-file=kid=/tmp/jwt-kid.txt
+
+# Clean up local key files
+rm -f /tmp/jwt-signing.pem /tmp/jwt-public.pem /tmp/jwt-kid.txt
+----
+
+NOTE: macOS ships LibreSSL which does not support Ed25519. Install OpenSSL 3.x via Homebrew: `brew install openssl@3`. The install script auto-detects Homebrew OpenSSL.
+
+=== Step 4: Install {openshell} via Helm
+
+Install the {openshell} Helm chart with {ocp-short}-specific overrides:
+
+[source,bash]
+----
+helm install openshell oci://ghcr.io/nvidia/openshell/helm-chart \
+    --namespace openshell \
+    --set pkiInitJob.enabled=false \
+    --set server.disableTls=true \
+    --set server.auth.allowUnauthenticatedUsers=true \
+    --set podSecurityContext.fsGroup=null \
+    --set securityContext.runAsUser=null
+----
+
+Why each override is needed:
+
+[cols="1,2", options="header"]
+|===
+| Override | Reason
+
+| `pkiInitJob.enabled=false`
+| We pre-created JWT keys in Step 3 (PKI Job is not SCC-compatible)
+
+| `server.disableTls=true`
+| Run gateway in plaintext for evaluation
+
+| `server.auth.allowUnauthenticatedUsers=true`
+| No authentication for this basic demo
+
+| `podSecurityContext.fsGroup=null`
+| Clear the chart's hardcoded `fsGroup: 1000` so {ocp-short} SCC can assign
+
+| `securityContext.runAsUser=null`
+| Clear the chart's hardcoded `runAsUser: 1000` so {ocp-short} SCC can assign
+|===
+
+To pin a specific version, add `--version <version>` to the command.
+
+=== Step 5: Wait for the Gateway
+
+[source,bash]
+----
+oc -n openshell rollout status statefulset/openshell --timeout=300s
+----
+
+Verify the pod is running:
+
+[source,bash]
+----
+oc -n openshell get pods
+----
+
+Expected output:
+
+[source]
+----
+NAME          READY   STATUS    RESTARTS   AGE
+openshell-0   1/1     Running   0          1m
+----
+
+=== Step 6: Create the {ocp-short} Route
+
+Expose the gateway service so the CLI can reach it from your workstation:
+
+[source,bash]
+----
+oc -n openshell apply -f demos/01-basic-openshell/manifests/route.yaml
+----
+
+Or create it imperatively:
+
+[source,bash]
+----
+oc -n openshell expose svc/openshell --port=8080 --name=openshell-gw
+----
+
+Get the route URL:
+
+[source,bash]
+----
+oc -n openshell get route openshell-gw -o jsonpath='{.spec.host}'
+----
+
+=== TLS Mode
+
+By default the gateway runs without TLS, and sandbox operations go through `oc port-forward` to avoid gRPC trailer issues with {ocp-short} routes. Setting `ENABLE_TLS=true` enables passthrough TLS via cert-manager for production-like setups.
+
+NOTE: For a full explanation of why passthrough TLS is needed and how to configure it, see the xref:tls.adoc[Passthrough TLS] reference page.
+
+== Verification
+
+[source,bash]
+----
+oc -n openshell get pods
+oc -n openshell get svc openshell
+oc -n openshell get route openshell-gw
+----
+
+== Troubleshooting
+
+*Gateway pod stuck in Pending:*
+
+Check if the PVC is bound. The gateway needs a 1Gi PVC for its SQLite database. Also verify a default StorageClass exists.
+
+[source,bash]
+----
+oc -n openshell get pvc
+oc get storageclass
+----
+
+*SCC errors on sandbox pods:*
+
+Verify the SCC binding was applied before Helm install:
+
+[source,bash]
+----
+oc adm policy who-can use scc privileged -n openshell
+----
+
+*Route not resolving:*
+
+Verify the Route was created and has a host assigned:
+
+[source,bash]
+----
+oc -n openshell get route openshell-gw -o jsonpath='{.spec.host}'
+----
+
+== References
+
+* link:https://docs.nvidia.com/openshell/latest/kubernetes/openshift[{openshell} on {ocp-short}^]
+* link:https://docs.nvidia.com/openshell/latest/[{openshell} Documentation^]
+
+== Next step
+
+Proceed to xref:03-first-sandbox.adoc[Phase 3: First Sandbox].

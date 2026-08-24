@@ -1,0 +1,204 @@
+= Phase 3: First Sandbox
+
+Create your first {openshell} sandbox and test the four security isolation layers.
+
+TIP: All file paths and script commands in this guide are relative to the link:{repo-url}[agent-harness-in-a-box] repository root.
+
+IMPORTANT: This guide is not a replacement for the link:https://docs.nvidia.com/openshell/latest/[official {openshell} documentation^].
+
+== Overview
+
+With the gateway running, you can now create sandboxes - isolated Linux environments where AI agents execute code. Each sandbox runs in its own pod managed by the Agent Sandbox CRD and is controlled through the `openshell` CLI.
+
+This phase covers:
+
+* Registering the gateway with the CLI
+* Creating and connecting to sandboxes
+* Applying a strict security policy
+* Testing all four isolation layers
+
+== Connect the CLI to the Gateway
+
+=== Step 1: Register the Gateway
+
+Tell the CLI where the gateway is:
+
+[source,bash]
+----
+GW_URL="http://$(oc -n openshell get route openshell-gw -o jsonpath='{.spec.host}')"
+openshell gateway add "$GW_URL" --local --name openshift
+----
+
+For TLS mode, use `https://` and set the insecure flag (the self-signed cert is not in your system trust store):
+
+[source,bash]
+----
+GW_URL="https://$(oc -n openshell get route openshell-gw -o jsonpath='{.spec.host}')"
+export OPENSHELL_GATEWAY_INSECURE=true
+openshell gateway add "$GW_URL" --local --name openshift
+----
+
+=== Step 2: Verify the Connection
+
+[source,bash]
+----
+openshell status
+----
+
+This shows the gateway connection details and health status.
+
+You can also run the automated verification script:
+
+[source,bash]
+----
+bash verify.sh
+----
+
+=== Monitor Live Events
+
+Use `openshell term` to watch sandbox events in real-time:
+
+[source,bash]
+----
+openshell term
+----
+
+This streams OCSF-formatted events showing sandbox creation, command execution, network policy enforcement (ALLOWED/DENIED), and more. Leave it running in a second terminal while testing sandbox security.
+
+== Create a Sandbox
+
+=== Quick Test
+
+Run a command and exit:
+
+[source,bash]
+----
+openshell sandbox create --name test -- echo 'Hello from OpenShell!'
+----
+
+=== Interactive Session
+
+[source,bash]
+----
+openshell sandbox create --name my-sandbox
+
+openshell sandbox connect my-sandbox
+
+# Inside the sandbox, you are the 'sandbox' user with restricted access.
+# Try: whoami, ls /, cat /etc/os-release
+
+exit
+
+openshell sandbox list
+
+openshell sandbox delete my-sandbox
+----
+
+=== Autonomous Mode
+
+Run a task, get results, and destroy the sandbox automatically:
+
+[source,bash]
+----
+openshell sandbox create --name auto-test --no-keep -- \
+    bash -c 'echo "Task done" > /sandbox/result.txt && cat /sandbox/result.txt'
+----
+
+The `--no-keep` flag automatically deletes the sandbox after the command exits.
+
+== Sandbox Security: Strict Policy
+
+This demo uses a *strict* policy that locks the sandbox to inference-only access. {openshell} enforces four layers of isolation inside every sandbox pod.
+
+For a full explanation of all three policy tiers (strict, standard, permissive), see the xref:security.adoc[Sandbox Security Tiers] reference page.
+
+=== Apply the Strict Policy
+
+[source,bash]
+----
+openshell policy set --global --policy config/policy-strict.yaml --yes
+----
+
+=== Layer 1: Network Default-Deny (CONNECT Proxy)
+
+Every outbound connection goes through {openshell}'s HTTP CONNECT proxy. Only endpoints explicitly listed in the policy are reachable - everything else returns HTTP 403.
+
+[source,bash]
+----
+# From inside the sandbox:
+curl https://github.com          # -> HTTP 403 (not in policy)
+curl https://google.com          # -> HTTP 403 (not in policy)
+----
+
+=== Layer 2: Binary Binding
+
+The strict policy restricts which executables can reach the inference endpoint. Only `python3` and `node` are allowed - `curl` is blocked even for allowed hosts:
+
+[source,bash]
+----
+curl $LITELLM_URL/health            # -> HTTP 403 (curl not in binaries list)
+python3 -c "import urllib.request; \
+    print(urllib.request.urlopen('$LITELLM_URL/health').status)"  # -> 200 (python3 IS allowed)
+----
+
+=== Layer 3: Landlock Filesystem
+
+Landlock (Linux Security Module) restricts filesystem access at the kernel level. Paths must be explicitly declared as read-only or read-write in the policy:
+
+[source,bash]
+----
+echo test > /workspace/test.txt    # OK (read-write path)
+echo test > /tmp/test.txt          # OK (read-write path)
+echo test > /etc/test.txt          # Permission denied (read-only)
+echo test > /var/data.txt          # Permission denied (not in policy)
+cat /etc/os-release                # OK (read-only allows reads)
+----
+
+=== Layer 4: Process Isolation
+
+The agent process runs as the unprivileged `sandbox` user, not root:
+
+[source,bash]
+----
+whoami   # -> sandbox
+id       # -> uid=sandbox gid=sandbox
+----
+
+=== Run the Full Security Test
+
+[source,bash]
+----
+bash setup-sandbox.sh              # create sandbox with strict policy
+bash test-sandbox-security.sh      # run all tests, see color-coded report
+----
+
+This runs all network, filesystem, and process tests and prints a color-coded summary showing what {openshell} blocks at the strict tier.
+
+== Troubleshooting
+
+*`missing grpc-status trailer` or gRPC errors:*
+
+{ocp-short} HAProxy strips gRPC trailers from H2C, edge, and re-encrypt routes. Use `ENABLE_TLS=true` for passthrough TLS, or use `oc port-forward` to bypass the route entirely. See xref:tls.adoc[Passthrough TLS].
+
+*openshell CLI `connection refused` or `Disconnected`:*
+
+Verify the route URL matches what you registered. Check `openshell gateway list` and compare with `oc get route`. For TLS mode, make sure you used `https://` and set `OPENSHELL_GATEWAY_INSECURE=true`.
+
+*Sandbox stuck in `Creating` state:*
+
+Check sandbox pod events for image pull or SCC issues:
+
+[source,bash]
+----
+oc -n openshell get pods
+oc -n openshell describe pod -l app.kubernetes.io/component=sandbox
+----
+
+== References
+
+* link:https://docs.nvidia.com/openshell/latest/[{openshell} Documentation^]
+* link:https://docs.nvidia.com/openshell/latest/security[{openshell} Security Model^]
+
+== Next step
+
+Proceed to xref:04-keycloak-oidc.adoc[Phase 4: {rhbk} OIDC].

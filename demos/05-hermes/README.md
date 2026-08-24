@@ -100,5 +100,5 @@ Test with: `bash test-sandbox-security.sh`
 
 ```bash
 bash teardown.sh         # remove gateway + namespace
-bash teardown.sh --crd   # also remove Agent Sandbox CRDs
+bash teardown.sh --crd   # also remove Agent Sandbox operator
 ```

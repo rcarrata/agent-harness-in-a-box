@@ -1,0 +1,130 @@
+= Automated Setup
+
+Deploy any demo end-to-end with a single install script.
+
+TIP: All file paths and script commands in this guide are relative to the link:{repo-url}[agent-harness-in-a-box] repository root.
+
+IMPORTANT: This guide is not a replacement for the link:https://docs.nvidia.com/openshell/latest/[official {openshell} documentation^].
+
+== Overview
+
+Each demo includes an `install.sh` script that runs all steps automatically. The scripts are idempotent and can be re-run safely.
+
+== Prerequisites Check
+
+[source,bash]
+----
+bash common/prerequisites.sh
+----
+
+This verifies `oc`, `helm`, `openshell` CLI, cluster login, and StorageClass availability.
+
+== Demo 1: Basic {openshell}
+
+[source,bash]
+----
+cd demos/01-basic-openshell
+
+# Default (HTTP, uses port-forward for sandbox operations)
+bash install.sh
+
+# With TLS (passthrough route, no port-forward needed)
+ENABLE_TLS=true bash install.sh
+
+# Verify
+bash verify.sh
+
+# Create sandbox with strict policy and run security tests
+bash setup-sandbox.sh
+bash test-sandbox-security.sh
+----
+
+== Demo 2: OpenCode + {rhbk}
+
+[source,bash]
+----
+cd demos/02-opencode-keycloak
+bash install.sh
+bash verify.sh
+bash setup-sandbox.sh
+----
+
+== Demo 3: Claude Code
+
+NOTE: Requires Demo 2 to be deployed first (uses the same Keycloak and gateway).
+
+[source,bash]
+----
+cd demos/03-claude-code
+bash setup-sandbox.sh
+----
+
+== Demo 4: Escape the Shell CTF
+
+[source,bash]
+----
+cd demos/04-escape-the-shell
+bash install.sh
+bash verify.sh
+bash setup-sandbox.sh
+----
+
+== Demo 5: Hermes Agent
+
+[source,bash]
+----
+cd demos/05-hermes
+bash install.sh
+bash verify.sh
+bash setup-sandbox.sh
+----
+
+== Environment Variables
+
+[cols="1,1,2", options="header"]
+|===
+| Variable | Default | Purpose
+
+| `NAMESPACE`
+| `openshell`
+| {ocp-short} namespace for all resources
+
+| `OPENSHELL_VERSION`
+| _(latest)_
+| Pin a specific Helm chart version
+
+| `ENABLE_TLS`
+| `false`
+| Enable passthrough TLS via cert-manager
+
+| `LITELLM_URL`
+| `https://maas-rhdp.apps.maas.redhatworkshops.io`
+| {litellm} endpoint used in security tests
+
+| `LITELLM_API_KEY`
+| _(none)_
+| API key for {litellm} inference
+
+| `LITELLM_MODEL`
+| `gemini-2.5-pro`
+| Default LLM model for agents
+|===
+
+TIP: Copy `.env.example` to `.env` and fill in your values. The scripts source `.env` when present.
+
+== Teardown
+
+Each demo includes a teardown script:
+
+[source,bash]
+----
+# Remove demo resources (gateway, namespace, secrets)
+bash teardown.sh
+
+# Also remove the Agent Sandbox operator
+bash teardown.sh --crd
+----
+
+== Next step
+
+Proceed to xref:01-prerequisites.adoc[Phase 1: Prerequisites] for the step-by-step walkthrough.

@@ -35,7 +35,16 @@ check "Route exists" oc -n "$NAMESPACE" get route openshell-gw
 
 GW_ROUTE=$(oc -n "$NAMESPACE" get route openshell-gw -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
 if [ -n "$GW_ROUTE" ]; then
-    check "Gateway reachable via Route" curl -s --max-time 5 -o /dev/null -w '' "http://$GW_ROUTE"
+    TERMINATION=$(oc -n "$NAMESPACE" get route openshell-gw -o jsonpath='{.spec.tls.termination}' 2>/dev/null || echo "")
+    if [ "$TERMINATION" = "passthrough" ]; then
+        check "Gateway reachable via Route (TLS)" curl -sk --max-time 5 -o /dev/null -w '' "https://$GW_ROUTE"
+    else
+        check "Gateway reachable via Route" curl -s --max-time 5 -o /dev/null -w '' "http://$GW_ROUTE"
+    fi
+fi
+
+if command -v openshell &>/dev/null; then
+    check "openshell CLI connectivity" openshell status
 fi
 
 echo ""

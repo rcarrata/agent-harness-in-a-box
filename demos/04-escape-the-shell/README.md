@@ -175,7 +175,7 @@ This tests all 5 challenge areas and prints a color-coded PASS/FAIL report, incl
 bash teardown.sh
 ```
 
-To also remove Agent Sandbox CRDs:
+To also remove the Agent Sandbox operator:
 
 ```bash
 bash teardown.sh --crd

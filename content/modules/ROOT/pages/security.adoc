@@ -1,0 +1,402 @@
+= Sandbox Security Tiers
+
+Reference for {openshell}'s four-layer sandbox isolation model and the three policy tiers used across the demos in this guide on {ocp-short}.
+
+TIP: All file paths and script commands in this guide are relative to the link:{repo-url}[agent-harness-in-a-box^] repository root.
+
+== Security Layers
+
+{openshell} enforces four isolation layers inside every sandbox pod. These layers work together to restrict what an AI agent can do, even if the agent's code is compromised or the prompt is adversarial.
+
+[cols="1,3", options="header"]
+|===
+| Layer | What it does
+
+| *Network default-deny*
+| An HTTP CONNECT proxy intercepts all outbound TCP connections. Only endpoints declared in the sandbox policy are reachable. Everything else gets an HTTP 403.
+
+| *Binary binding*
+| Network rules are bound to specific executables via procfs identity tracking. The proxy knows which binary opened the connection. For example, `python3` can reach the inference endpoint but `curl` cannot, even though the host is allowed.
+
+| *Landlock filesystem*
+| Linux Security Module (LSM) that restricts filesystem access at the kernel level. Paths must be explicitly declared as read-only or read-write in the policy. Unlike Unix permissions, Landlock is mandatory access control and cannot be bypassed even by root.
+
+| *Process isolation*
+| The agent process runs as the unprivileged `sandbox` user, never as root. Combined with {ocp-short}'s Security Context Constraints, this prevents privilege escalation.
+|===
+
+NOTE: {ocp-short} already prevents running as root via Security Context Constraints. {openshell} adds the network, binary binding, and filesystem layers on top of that baseline.
+
+=== Network default-deny in practice
+
+[source,bash]
+----
+# From inside a sandbox with strict policy:
+curl https://github.com          # -> HTTP 403 (not in policy)
+curl https://google.com          # -> HTTP 403 (not in policy)
+----
+
+=== Binary binding in practice
+
+[source,bash]
+----
+# Inference endpoint is allowed, but only for python3/node:
+curl $LITELLM_URL/health         # -> HTTP 403 (curl not in binaries list)
+python3 -c "import urllib.request; print(urllib.request.urlopen('$LITELLM_URL/health').status)"
+                                  # -> HTTP 200 (python3 IS allowed)
+----
+
+=== Landlock filesystem in practice
+
+[source,bash]
+----
+echo test > /workspace/test.txt   # OK (read-write path)
+echo test > /tmp/test.txt         # OK (read-write path)
+echo test > /etc/test.txt         # Permission denied (read-only)
+echo test > /var/data.txt         # Permission denied (not in policy)
+cat /etc/os-release               # OK (read-only allows reads)
+----
+
+=== Process isolation in practice
+
+[source,bash]
+----
+whoami   # -> sandbox
+id       # -> uid=sandbox gid=sandbox
+----
+
+== Policy Tiers
+
+The demos in this guide use three policy tiers. Each tier is a YAML file that declares which network endpoints, binaries, and filesystem paths are allowed.
+
+[cols="1,2,2", options="header"]
+|===
+| Tier | Use case | What it allows
+
+| *Strict*
+| Untrusted prompts, compliance-sensitive, air-gapped
+| Inference endpoint only (`python3`/`node`). Zero external egress.
+
+| *Standard*
+| Everyday coding agent work with balanced security
+| Inference, package registries (npm/PyPI), GitHub (read-only), MLflow tracing.
+
+| *Permissive*
+| Trusted coding agents (Claude Code) needing broad access
+| Inference, package registries, GitHub (full access), direct AI APIs (Anthropic, OpenAI, Vertex), MLflow.
+|===
+
+=== Strict policy
+
+Location: `demos/01-basic-openshell/config/policy-strict.yaml`
+
+Zero external egress. The agent can reach the {litellm} inference proxy and nothing else. Binary binding restricts access to `python3` and `node` only.
+
+[source,yaml]
+----
+version: 1
+
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /usr
+    - /lib
+    - /lib64
+    - /bin
+    - /sbin
+    - /proc
+    - /dev/urandom
+    - /etc
+  read_write:
+    - /sandbox
+    - /workspace
+    - /tmp
+    - /dev/null
+    - /dev/zero
+
+landlock:
+  compatibility: best_effort
+
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+network_policies:
+
+  litellm_inference:
+    name: "LiteLLM Inference Proxy"
+    endpoints:
+      - host: "maas-rhdp.apps.maas.redhatworkshops.io"
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: full
+      - host: "*.redhatworkshops.io"
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: full
+    binaries:
+      - { path: /usr/bin/python3 }
+      - { path: /usr/bin/python3.12 }
+      - { path: "/sandbox/.uv/python/**" }
+      - { path: /usr/bin/node }
+----
+
+=== Standard policy
+
+Location: `demos/02-opencode-keycloak/config/policy-standard.yaml.template`
+
+Allows inference, package registries (npm, PyPI), GitHub (read-only), and {rhoai} MLflow tracing. Blocks direct AI APIs, web browsing, and GitHub write operations.
+
+[source,yaml]
+----
+version: 1
+
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /usr
+    - /lib
+    - /lib64
+    - /bin
+    - /sbin
+    - /proc
+    - /dev/urandom
+    - /etc
+    - /opt
+    - /var/log
+  read_write:
+    - /sandbox
+    - /workspace
+    - /tmp
+    - /home/sandbox
+    - /dev/null
+    - /dev/zero
+
+landlock:
+  compatibility: best_effort
+
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+network_policies:
+
+  litellm_maas:
+    name: "LiteLLM MaaS"
+    endpoints:
+      - host: "maas-rhdp.apps.maas.redhatworkshops.io"
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: full
+      - host: "*.redhatworkshops.io"
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: full
+    binaries:
+      - { path: /usr/bin/curl }
+      - { path: /usr/bin/python3 }
+      - { path: "/sandbox/.uv/python/**" }
+      - { path: /usr/bin/node }
+
+  npm_registry:
+    name: "npm"
+    endpoints:
+      - host: registry.npmjs.org
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: full
+    binaries:
+      - { path: /usr/bin/curl }
+      - { path: /usr/bin/node }
+      - { path: /usr/local/bin/opencode }
+
+  pypi:
+    name: "PyPI"
+    endpoints:
+      - host: pypi.org
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: full
+      - host: files.pythonhosted.org
+        port: 443
+        enforcement: enforce
+        access: full
+    binaries:
+      - { path: /usr/bin/curl }
+      - { path: /usr/bin/python3 }
+      - { path: "/sandbox/.uv/python/**" }
+      - { path: /usr/local/bin/uv }
+
+  github_readonly:
+    name: "GitHub (read-only)"
+    endpoints:
+      - host: github.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+      - host: api.github.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+      - host: "*.githubusercontent.com"
+        port: 443
+        enforcement: enforce
+        access: read-only
+    binaries:
+      - { path: /usr/bin/curl }
+      - { path: /usr/bin/git }
+      - { path: /usr/bin/node }
+
+  mlflow_rhoai:
+    name: "RHOAI MLflow"
+    endpoints:
+      - host: "mlflow.redhat-ods-applications.svc.cluster.local"
+        port: 8443
+        protocol: rest
+        enforcement: enforce
+        access: full
+      - host: "mlflow-redhat-ods-applications.__OCP_APPS_DOMAIN__"
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: full
+    binaries:
+      - { path: /usr/bin/curl }
+      - { path: /usr/bin/python3 }
+      - { path: "/sandbox/.uv/python/**" }
+----
+
+NOTE: The standard and permissive policies are templates. Replace `+__OCP_APPS_DOMAIN__+` with your cluster's apps domain before applying. The install scripts handle this automatically via `envsubst`.
+
+=== Permissive policy
+
+Location: `demos/03-claude-code/config/policy-permissive.yaml.template`
+
+Allows inference, package registries, GitHub (full access including writes), and direct AI API access (Anthropic, OpenAI, Google Vertex). Still enforces an allowlist - unrecognized hosts are blocked.
+
+The key differences from standard:
+
+[cols="1,1,1", options="header"]
+|===
+| Capability | Standard | Permissive
+
+| GitHub access
+| Read-only
+| Full (read + write)
+
+| Direct AI APIs
+| Blocked
+| Anthropic, OpenAI, Vertex
+
+| `curl` to inference
+| Allowed
+| Allowed
+
+| Claude CLI binary
+| Not listed
+| Allowed for inference and GitHub
+|===
+
+[source,yaml]
+----
+# Additional network rules in permissive (beyond standard):
+
+  github:
+    name: "GitHub (full access)"
+    endpoints:
+      - host: github.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: full     # <1>
+      - host: api.github.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: full
+    binaries:
+      - { path: /usr/bin/curl }
+      - { path: /usr/bin/git }
+      - { path: /usr/bin/node }
+      - { path: /usr/local/bin/claude }   # <2>
+
+  anthropic_api:
+    name: "Anthropic API"
+    endpoints:
+      - host: api.anthropic.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: full
+    binaries:
+      - { path: /usr/bin/curl }
+      - { path: /usr/bin/node }
+      - { path: /usr/local/bin/claude }
+----
+<1> `access: full` instead of `read-only` - allows POST, PUT, DELETE to GitHub API
+<2> The Claude Code CLI binary is added to the allowed binaries list
+
+== Applying a Policy
+
+Use the `openshell policy set` command to apply a policy to a running sandbox. Network policies are hot-reloadable - no sandbox restart needed.
+
+[source,bash]
+----
+# Apply strict policy
+openshell policy set --policy config/policy-strict.yaml --wait my-sandbox
+
+# Apply globally (all sandboxes)
+openshell policy set --global --policy config/policy-strict.yaml --yes
+----
+
+IMPORTANT: Filesystem and process policies are static and applied at sandbox creation time. Only network policies can be changed at runtime via hot-reload.
+
+== Testing Security
+
+Each demo includes a `test-sandbox-security.sh` script that validates network, filesystem, and process isolation:
+
+[source,bash]
+----
+# Create sandbox with strict policy and run all tests
+bash setup-sandbox.sh
+bash test-sandbox-security.sh
+----
+
+The script runs through network, binary binding, filesystem, and process tests and prints a color-coded PASS/FAIL report.
+
+== Which demos use which tier
+
+[cols="1,1,2", options="header"]
+|===
+| Demo | Policy tier | Why
+
+| 1. Basic {openshell}
+| Strict
+| Demonstrates maximum lockdown for untrusted prompts
+
+| 2. OpenCode + {rhbk}
+| Standard
+| Coding agent needs npm/PyPI and read-only GitHub
+
+| 3. Claude Code
+| Permissive
+| Claude Code needs GitHub write access and direct API calls
+
+| 4. Escape the Shell CTF
+| Strict + Permissive
+| Switches between tiers to demonstrate hot-reload
+
+| 5. Hermes Agent
+| Standard
+| Autonomous agent with balanced security
+|===
+
+xref:index.adoc[Back to Overview]

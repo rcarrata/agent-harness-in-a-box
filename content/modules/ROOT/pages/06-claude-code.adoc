@@ -1,0 +1,270 @@
+= Phase 6: Claude Code Agent
+
+Run Claude Code inside {openshell} sandboxes with {litellm} inference and MLflow tracing.
+
+TIP: All file paths and script commands in this guide are relative to the link:{repo-url}[agent-harness-in-a-box] repository root.
+
+IMPORTANT: This guide is not a replacement for the link:https://docs.nvidia.com/openshell/latest/[official {openshell} documentation^].
+
+== Overview
+
+Claude Code is Anthropic's CLI-based AI coding agent. This phase runs it inside an {openshell} sandbox using {litellm} as the API backend (Anthropic Messages API format). The sandbox uses a *permissive* policy - the widest access tier, which allows direct AI APIs, full GitHub access, and all package registries.
+
+This phase assumes xref:04-keycloak-oidc.adoc[Phase 4] ({rhbk} OIDC) is already deployed. It reuses the same {openshell} gateway and authentication.
+
+[source]
+----
++------------------+          +----------------------------+
+|                  |  gRPC    |                            |
+| openshell CLI    +--------->+ OpenShell Gateway          |
+|                  |          | (from Phase 4)             |
++------------------+          +-------------+--------------+
+                                            |
+                              creates       |
+                                            v
+                              +-------------+--------------+
+                              |  Sandbox Pod               |
+                              |  - Claude Code CLI         |
+                              |  - ANTHROPIC_BASE_URL ->   |
+                              |    LiteLLM endpoint        |
+                              +----+-----------------+-----+
+                                   |                 |
+                                   v                 v
+                              +----+----+     +------+------+
+                              | LiteLLM |     | RHOAI       |
+                              | (MaaS)  |     | MLflow      |
+                              +---------+     +-------------+
+----
+
+== Prerequisites
+
+* Phase 4 completed ({openshell} + {rhbk} deployed and working)
+* `openshell` CLI configured and connected to the gateway
+* `.env` file at repo root with {litellm} credentials
+* Working directory: `demos/03-claude-code/`
+
+== Installation
+
+=== Step 1: Apply the Network Policy
+
+The policy must allow access to your {litellm} endpoint and MLflow:
+
+[source,bash]
+----
+openshell policy set --global --policy config/policy.yaml --yes
+----
+
+=== Step 2: Create the Sandbox
+
+Use a pre-baked sandbox image (recommended):
+
+[source,bash]
+----
+openshell sandbox create --name claude-demo \
+    --from quay.io/rcarrata/agentic-harness-openshell:claude-code-v1
+----
+
+Or use the setup script:
+
+[source,bash]
+----
+bash setup-sandbox.sh
+----
+
+Wait for it to reach `Ready`:
+
+[source,bash]
+----
+openshell sandbox list
+----
+
+=== Step 3: Install Claude Code Manually (Alternative)
+
+If not using a pre-baked image, install Claude Code inside a default sandbox:
+
+[source,bash]
+----
+openshell sandbox connect claude-demo
+
+# Inside the sandbox
+curl -fsSL https://claude.ai/install.sh | bash
+export PATH="/sandbox/.local/bin:$PATH"
+claude --version
+----
+
+=== Step 4: Configure {litellm} as the API Backend
+
+Claude Code uses the Anthropic Messages API format (`/v1/messages`). {litellm} supports this format natively.
+
+If you used `setup-sandbox.sh`, credentials are auto-loaded from `.profile`. For manual setup:
+
+[source,bash]
+----
+export ANTHROPIC_API_KEY="your-litellm-api-key"
+export ANTHROPIC_BASE_URL="https://your-litellm-endpoint.example.com"
+----
+
+Test that the API is reachable:
+
+[source,bash]
+----
+curl -s -X POST "${ANTHROPIC_BASE_URL}/v1/messages" \
+  -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"llama-scout-17b","max_tokens":10,"messages":[{"role":"user","content":"Say hi"}]}'
+----
+
+=== Step 5: Run Claude Code
+
+[source,bash]
+----
+claude --model llama-scout-17b
+----
+
+For non-interactive use (CI/automation):
+
+[source,bash]
+----
+claude -p "List the files in /workspace" --model llama-scout-17b
+----
+
+=== Step 6: Configure {rhoai} MLflow Tracing (Optional)
+
+Inside the sandbox:
+
+[source,bash]
+----
+OCP_TOKEN=$(oc whoami -t)
+
+export MLFLOW_TRACKING_URI="https://mlflow.redhat-ods-applications.svc.cluster.local:8443/mlflow"
+export MLFLOW_TRACKING_TOKEN="$OCP_TOKEN"
+export MLFLOW_EXPERIMENT_NAME="claude-code-sandbox"
+----
+
+The `setup-sandbox.sh` script configures this automatically when an OCP token is available.
+
+=== Step 7: Build a Custom Sandbox Image (Optional)
+
+[source,bash]
+----
+cd sandbox-image
+podman build --platform linux/amd64 \
+    --build-arg CLAUDE_CODE_VERSION=2.1.206 \
+    -t quay.io/<your-org>/agentic-harness-openshell:claude-code-v1 \
+    -f Containerfile.openshell .
+podman push quay.io/<your-org>/agentic-harness-openshell:claude-code-v1
+----
+
+== Network Policy: Permissive Tier
+
+This sandbox uses a *permissive* policy - the widest access tier for trusted development. Even at this level, {openshell} still enforces an allowlist. Unrecognized hosts are blocked.
+
+[source,bash]
+----
+# From inside the sandbox:
+curl https://api.github.com/repos/NVIDIA/OpenShell     # -> HTTP 200 (GET)
+curl -X POST https://api.github.com/repos/.../issues   # -> HTTP 200 (POST allowed!)
+curl https://api.anthropic.com/v1/models                # -> HTTP 200 (direct AI API)
+curl https://example.com                                # -> HTTP 403 (still blocked!)
+----
+
+Policies hot-reload without restarting the sandbox:
+
+[source,bash]
+----
+# Apply strict - everything locks down instantly
+openshell policy set --global --policy ../01-basic-openshell/config/policy-strict.yaml --yes
+curl https://api.github.com     # -> HTTP 403 (was 200 seconds ago!)
+
+# Restore permissive - access returns
+openshell policy set --global --policy /tmp/policy-permissive-rendered.yaml --yes
+curl https://api.github.com     # -> HTTP 200 (back to normal)
+----
+
+For a full comparison across security tiers, see xref:security.adoc[Sandbox Security Tiers].
+
+== Environment Variables
+
+[cols="1,2,2", options="header"]
+|===
+| Variable | Purpose | Example
+
+| `ANTHROPIC_API_KEY`
+| API key for the inference endpoint
+| `sk-...`
+
+| `ANTHROPIC_BASE_URL`
+| Base URL for the Anthropic Messages API
+| `\https://your-endpoint.example.com`
+
+| `MLFLOW_TRACKING_URI`
+| {rhoai} MLflow URL
+| `\https://mlflow.redhat-ods-applications.svc.cluster.local:8443/mlflow`
+
+| `MLFLOW_TRACKING_TOKEN`
+| OCP bearer token for MLflow auth
+| `<from oc whoami -t>`
+
+| `MLFLOW_EXPERIMENT_NAME`
+| MLflow experiment name
+| `claude-code-sandbox`
+|===
+
+== Verification
+
+[source,bash]
+----
+openshell sandbox list
+----
+
+Verify Claude Code responds:
+
+[source,bash]
+----
+openshell sandbox connect claude-demo
+claude -p "What is 2+2?" --model llama-scout-17b
+----
+
+Run the full security test:
+
+[source,bash]
+----
+bash test-sandbox-security.sh
+----
+
+== Troubleshooting
+
+*Claude Code hangs on first run:*
+
+Claude Code may prompt for terms acceptance on first launch. Run it interactively once (`openshell sandbox connect`, then `claude`) to complete the onboarding flow.
+
+*"ECONNRESET" when installing via npm:*
+
+The CONNECT proxy may reset connections for large npm packages. Use the pre-baked sandbox image or the manual binary download method.
+
+*API returns 403 from sandbox:*
+
+The network policy does not allow the endpoint. Check that `config/policy-permissive.yaml.template` includes your {litellm} hostname and re-apply with `openshell policy set --global`.
+
+*"Incorrect API key" errors:*
+
+Verify your API key works outside the sandbox first:
+
+[source,bash]
+----
+curl -s -X POST "https://your-endpoint.example.com/v1/messages" \
+  -H "x-api-key: YOUR_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"llama-scout-17b","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}'
+----
+
+== References
+
+* link:https://docs.anthropic.com/en/docs/claude-code[Claude Code Documentation^]
+* link:https://docs.nvidia.com/openshell/latest/[{openshell} Documentation^]
+
+== Next step
+
+Proceed to xref:07-escape-the-shell.adoc[Phase 7: Escape the Shell CTF].

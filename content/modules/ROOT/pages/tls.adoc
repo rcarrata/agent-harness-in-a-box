@@ -1,0 +1,336 @@
+= Passthrough TLS
+
+How to expose the {openshell} gRPC gateway through an {ocp-short} Route using passthrough TLS, and why it is the only route type that works with gRPC.
+
+TIP: All file paths and script commands in this guide are relative to the link:{repo-url}[agent-harness-in-a-box^] repository root.
+
+== The Problem: gRPC Trailers and {ocp-short} Routes
+
+The {openshell} gateway uses gRPC (HTTP/2) for all CLI-to-gateway communication. {ocp-short}'s default HAProxy router terminates TLS and re-encodes traffic, which strips gRPC trailing metadata (`grpc-status`, `grpc-message`). Without these trailers, every gRPC call fails with:
+
+[source,text]
+----
+missing grpc-status trailer, stream was terminated without a final status
+----
+
+A passthrough TLS route solves this by forwarding raw TCP to the gateway pod. HAProxy never inspects the HTTP/2 frames, so gRPC trailers arrive intact. The trade-off is that the gateway must terminate TLS itself.
+
+== Why Other Route Types Fail
+
+[cols="1,1,3", options="header"]
+|===
+| Route type | Works? | Reason
+
+| Plain h2c
+| No
+| HAProxy strips gRPC trailers during HTTP/2 re-encoding
+
+| Edge TLS
+| No
+| Same trailer stripping - TLS terminates at the router, h2c backend
+
+| Re-encrypt TLS
+| No
+| HAProxy still parses HTTP/2 frames between its two TLS sessions
+
+| *Passthrough TLS*
+| *Yes*
+| HAProxy forwards raw TCP - never touches HTTP/2 frames or trailers
+
+| AWS NLB (LoadBalancer)
+| Yes
+| L4 TCP load balancer bypasses the router entirely
+
+| Port-forward
+| Yes
+| Direct tunnel, not production-viable
+|===
+
+Passthrough TLS is the only {ocp-short} Route type that works with gRPC because it is the only one where HAProxy does not decode the application-layer protocol.
+
+== Automated Setup
+
+The install scripts handle TLS automatically when you set the `ENABLE_TLS` environment variable:
+
+[source,bash]
+----
+ENABLE_TLS=true bash install.sh
+----
+
+This runs all the steps below. Continue reading for the manual walkthrough.
+
+== Prerequisites
+
+* {ocp-short} 4.x cluster with `oc` CLI authenticated as cluster-admin
+* {openshell} gateway deployed via Helm
+* cert-manager on the cluster (the install script auto-installs the link:https://github.com/redhat-cop/gitops-catalog/tree/main/openshift-cert-manager-operator[Red Hat cert-manager operator^] via OLM if CRDs are not already present)
+
+To install cert-manager manually:
+
+[source,bash]
+----
+oc apply -k https://github.com/redhat-cop/gitops-catalog/openshift-cert-manager-operator/operator/overlays/stable-v1
+----
+
+== Step 1: Create the cert-manager CA Chain
+
+cert-manager creates a certificate authority chain: SelfSigned Issuer, CA Certificate, CA Issuer, then server and client certificates.
+
+[source,yaml]
+----
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: openshell-selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: openshell-ca
+spec:
+  isCA: true
+  commonName: openshell-ca
+  secretName: openshell-ca-secret
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: openshell-selfsigned
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: openshell-ca-issuer
+spec:
+  ca:
+    secretName: openshell-ca-secret
+----
+
+Apply and wait for the CA certificate:
+
+[source,bash]
+----
+oc -n openshell apply -f - <<EOF
+# (paste the YAML above)
+EOF
+
+oc -n openshell wait --for=condition=Ready certificate/openshell-ca --timeout=60s
+----
+
+== Step 2: Create the Server Certificate
+
+The server certificate needs DNS SANs for both the external route hostname and internal Kubernetes service names.
+
+[source,yaml]
+----
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: openshell-server-tls
+spec:
+  secretName: openshell-tls
+  duration: 8760h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  dnsNames:
+    - "openshell-gw-openshell.apps.ocp.example.com"   # <1>
+    - "openshell.openshell.svc.cluster.local"
+    - "openshell.openshell.svc"
+    - "openshell"
+  issuerRef:
+    name: openshell-ca-issuer
+    kind: Issuer
+----
+<1> Replace with your cluster's actual route hostname (`openshell-gw-$\{NAMESPACE}.$\{APPS_DOMAIN}`)
+
+[source,bash]
+----
+oc -n openshell wait --for=condition=Ready certificate/openshell-server-tls --timeout=60s
+----
+
+== Step 3: Create the Client Certificate
+
+The client certificate is mounted into sandbox pods so the supervisor can authenticate to the gateway via mTLS.
+
+[source,yaml]
+----
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: openshell-client-tls
+spec:
+  secretName: openshell-client-ca
+  duration: 8760h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  usages:
+    - client auth
+    - digital signature
+  dnsNames:
+    - "openshell-sandbox.openshell.svc.cluster.local"
+    - "*.openshell.svc.cluster.local"
+  issuerRef:
+    name: openshell-ca-issuer
+    kind: Issuer
+----
+
+== Step 4: Update the Gateway Configuration
+
+Update the gateway ConfigMap to enable TLS and point to the certificate paths:
+
+[source,toml]
+----
+[openshell.gateway]
+disable_tls                    = false
+enable_loopback_service_http   = true
+client_tls_secret_name         = "openshell-tls"
+
+[openshell.gateway.tls]
+cert_path = "/etc/openshell-tls/tls.crt"
+key_path  = "/etc/openshell-tls/tls.key"
+
+[openshell.drivers.kubernetes]
+grpc_endpoint = "https://openshell.openshell.svc.cluster.local:8080"
+----
+
+Key settings:
+
+[cols="1,3", options="header"]
+|===
+| Setting | Purpose
+
+| `disable_tls = false`
+| Enables TLS on the gateway (the double negative means TLS is ON)
+
+| `enable_loopback_service_http = true`
+| Health probes on port 8081 still work over plain HTTP
+
+| `client_tls_secret_name`
+| Mounts the CA cert into sandbox pods at `/etc/openshell-tls/client/ca.crt`
+
+| `grpc_endpoint = "https://..."`
+| Sandbox supervisors connect to the gateway via HTTPS internally
+|===
+
+== Step 5: Mount the TLS Secret into the Gateway
+
+Patch the StatefulSet to add the TLS volume:
+
+[source,bash]
+----
+oc patch statefulset openshell -n openshell --type='json' -p='[
+  {"op":"add","path":"/spec/template/spec/volumes/-",
+   "value":{"name":"openshell-tls","secret":{"secretName":"openshell-tls","defaultMode":256}}},
+  {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-",
+   "value":{"name":"openshell-tls","mountPath":"/etc/openshell-tls","readOnly":true}}
+]'
+----
+
+== Step 6: Fix the HOME Environment Variable
+
+The {openshell} gateway StatefulSet writes runtime state to `$HOME`. On {ocp-short}, the default `HOME` (`/`) is not writable by the assigned UID. Set `HOME` to the gateway's PVC-backed path so the process can write its state files:
+
+[source,bash]
+----
+oc -n openshell set env statefulset/openshell HOME=/var/openshell
+----
+
+WARNING: Without this fix, the gateway pod may crash with permission errors when trying to write to `/`. This is specific to {ocp-short} where Security Context Constraints assign an arbitrary UID that does not own `/`.
+
+== Step 7: Restart the Gateway
+
+[source,bash]
+----
+oc delete pod openshell-0 -n openshell
+oc rollout status statefulset/openshell -n openshell --timeout=120s
+----
+
+Verify TLS is working in the logs:
+
+[source,bash]
+----
+oc logs openshell-0 -n openshell --tail=10 | grep -i tls
+# Expected: "TLS enabled - listening on encrypted HTTPS"
+# Expected: "TLS certificate file watcher started"
+----
+
+== Step 8: Create the Passthrough Route
+
+Remove any existing edge or h2c routes, then create the passthrough route:
+
+[source,bash]
+----
+oc -n openshell delete route openshell-gw 2>/dev/null || true
+
+ROUTE_HOST="openshell-gw-openshell.apps.ocp.example.com"
+oc create route passthrough openshell-gw \
+    --service=openshell --port=8080 \
+    --hostname="$ROUTE_HOST" -n openshell
+----
+
+Verify the route termination type:
+
+[source,bash]
+----
+oc get route openshell-gw -n openshell
+# TERMINATION column should show: passthrough
+----
+
+== Step 9: Register the Gateway
+
+Register the TLS-enabled gateway with the CLI. Use `--gateway-insecure` to accept the self-signed certificate:
+
+[source,bash]
+----
+ROUTE_HOST=$(oc -n openshell get route openshell-gw -o jsonpath='{.spec.host}')
+openshell gateway add --name my-cluster --local --gateway-insecure https://$ROUTE_HOST
+export OPENSHELL_GATEWAY_INSECURE=true
+----
+
+== Step 10: Verify
+
+[source,bash]
+----
+export OPENSHELL_GATEWAY_INSECURE=true
+
+# List sandboxes (gRPC through passthrough route)
+openshell sandbox list
+
+# Create and test a sandbox
+openshell sandbox create --name test-sandbox
+openshell sandbox exec --name test-sandbox -- whoami
+openshell sandbox delete test-sandbox
+----
+
+== Recreating Sandboxes After Enabling TLS
+
+If sandboxes existed before TLS was enabled, they must be deleted and recreated. The sandbox supervisor establishes its gRPC connection at pod startup - existing supervisors were configured for plaintext HTTP and will fail. New sandboxes automatically get the HTTPS endpoint and CA cert.
+
+[source,bash]
+----
+openshell sandbox delete my-sandbox
+openshell sandbox create --name my-sandbox
+----
+
+== Summary
+
+The key pieces for passthrough TLS on {ocp-short}:
+
+. *cert-manager CA chain* - SelfSigned Issuer, CA Certificate, CA Issuer, server and client certs
+. *TLS secret* with `ca.crt` so sandbox supervisors can verify the gateway
+. *Gateway config* with `disable_tls=false`, `client_tls_secret_name`, and HTTPS `grpc_endpoint`
+. *StatefulSet patch* to mount the TLS secret as a volume
+. *HOME fix* - `HOME=/var/openshell` so the gateway can write state on {ocp-short}
+. *Passthrough route* that forwards raw TCP/TLS to the gateway
+. *CLI env var* `OPENSHELL_GATEWAY_INSECURE=true` for self-signed cert acceptance
+
+The alternative is an AWS NLB (`service.beta.kubernetes.io/aws-load-balancer-type: nlb`), which bypasses the {ocp-short} router at L4 but is cloud-specific, requires DNS propagation time, and is not available on bare-metal or non-AWS clusters.
+
+xref:index.adoc[Back to Overview]

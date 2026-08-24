@@ -55,7 +55,7 @@ fi
 
 step "Phase 2: Deploy OpenShell with Keycloak OIDC"
 
-install_agent_sandbox_crd
+install_agent_sandbox_operator
 create_openshell_namespace "$NAMESPACE"
 grant_privileged_scc "$NAMESPACE"
 
