@@ -1,0 +1,134 @@
+= Phase 1: Prerequisites
+
+Install the `openshell` CLI and the {agent-sandbox} operator on {ocp-short}.
+
+TIP: All file paths and script commands in this guide are relative to the link:{repo-url}[agent-harness-in-a-box] repository root.
+
+IMPORTANT: This guide is not a replacement for the link:https://docs.nvidia.com/openshell/latest/[official {openshell} documentation^].
+
+== Overview
+
+Before deploying the {openshell} gateway, you need two prerequisites:
+
+[cols="1,3", options="header"]
+|===
+| Component | Purpose
+
+| `openshell` CLI
+| Command-line tool to register gateways, create sandboxes, and manage policies from your workstation
+
+| {agent-sandbox} operator
+| Provides the `Sandbox` CRD (`sandboxes.agents.x-k8s.io`) that {openshell} uses to manage sandbox pod lifecycle
+|===
+
+== Installation
+
+=== Step 1: Install the openshell CLI
+
+[source,bash]
+----
+# macOS
+brew install nvidia/openshell/openshell
+
+# Linux
+curl -fsSL https://docs.nvidia.com/openshell/latest/install.sh | bash
+----
+
+Verify the installation:
+
+[source,bash]
+----
+openshell --version
+----
+
+You need version 0.0.85 or later.
+
+=== Step 2: Install the {agent-sandbox} Operator
+
+The {agent-sandbox} provides the `Sandbox` CRD that {openshell} uses to manage sandbox pod lifecycle. Install it via OLM in the `openshift-operators` namespace:
+
+[source,bash]
+----
+cat <<'EOF' | oc apply -f -
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: agent-sandbox-operator
+  namespace: openshift-operators
+spec:
+  channel: preview-0.9
+  installPlanApproval: Automatic
+  name: agent-sandbox-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+EOF
+----
+
+Wait for the operator CSV to succeed:
+
+[source,bash]
+----
+CSV=$(oc -n openshift-operators get subscription agent-sandbox-operator \
+    -o jsonpath='{.status.installedCSV}')
+oc -n openshift-operators wait --for=jsonpath='{.status.phase}'=Succeeded \
+    csv/"$CSV" --timeout=300s
+----
+
+TIP: The operator CSV takes 30-60 seconds to appear after creating the Subscription. If `oc wait` returns "no matching resources found", wait a minute and retry.
+
+== Verification
+
+=== Verify the CRD
+
+[source,bash]
+----
+oc get crd sandboxes.agents.x-k8s.io
+----
+
+=== Check the Operator CSV
+
+[source,bash]
+----
+oc get csv -n openshift-operators | grep agent-sandbox
+----
+
+=== Run the Prerequisites Script
+
+[source,bash]
+----
+bash common/prerequisites.sh
+----
+
+This checks `oc`, `helm`, `openshell` CLI, cluster login, and StorageClass availability.
+
+== Appendix
+
+=== Alternative CRD Source
+
+The upstream link:https://github.com/kubernetes-sigs/agent-sandbox[kubernetes-sigs/agent-sandbox^] CRDs can be installed manually instead of using the {agent-sandbox} operator. Both provide the same `Sandbox` CRD and the rest of the guide works the same.
+
+=== System Requirements
+
+[cols="1,2", options="header"]
+|===
+| Requirement | Details
+
+| {ocp-short}
+| 4.19+ with cluster-admin access (tested on 4.20, 4.21)
+
+| CLI tools
+| `oc`, `helm` 3.x, `openshell` 0.0.85+
+
+| Storage
+| Default StorageClass with RWO support (gateway uses 1Gi PVC)
+|===
+
+== References
+
+* link:https://docs.nvidia.com/openshell/latest/install[{openshell} CLI Install Guide^]
+* link:https://docs.redhat.com/en/documentation/openshift_sandboxed_containers/1.12/html/deploying_red_hat_build_of_agent_sandbox/[{agent-sandbox} Documentation^]
+* link:https://github.com/kubernetes-sigs/agent-sandbox[Agent Sandbox SIG^]
+
+== Next step
+
+Proceed to xref:02-gateway-deployment.adoc[Phase 2: Gateway Deployment].

@@ -26,8 +26,8 @@ echo ""
 
 check_prereqs
 
-# Step 1: Agent Sandbox CRD
-install_agent_sandbox_crd
+# Step 1: Agent Sandbox operator
+install_agent_sandbox_operator
 
 # Step 2: Namespace
 create_openshell_namespace "$NAMESPACE"

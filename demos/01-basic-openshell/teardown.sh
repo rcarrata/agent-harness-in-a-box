@@ -33,10 +33,13 @@ step "Delete namespace"
 oc delete ns "$NAMESPACE" 2>/dev/null || true
 
 if [ "$DELETE_CRDS" = "--crd" ]; then
-    step "Delete Agent Sandbox CRDs"
-    oc delete -f \
-        https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/manifest.yaml \
-        2>/dev/null || true
+    step "Delete Agent Sandbox operator"
+    oc -n openshift-operators delete subscription agent-sandbox-operator 2>/dev/null || true
+    local csv
+    csv=$(oc -n openshift-operators get csv -o name 2>/dev/null | grep agent-sandbox || true)
+    if [ -n "$csv" ]; then
+        oc -n openshift-operators delete "$csv" 2>/dev/null || true
+    fi
 fi
 
 echo ""

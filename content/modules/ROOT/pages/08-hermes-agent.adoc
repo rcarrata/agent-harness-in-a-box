@@ -1,0 +1,212 @@
+= Phase 8: Hermes Agent
+
+Run the link:https://github.com/NousResearch/hermes-agent[Hermes AI agent^] (NousResearch) inside an {openshell} sandbox on {ocp-short} with {litellm} inference and optional {rhoai} MLflow tracing.
+
+TIP: All file paths and script commands in this guide are relative to the link:{repo-url}[agent-harness-in-a-box] repository root.
+
+IMPORTANT: This guide is not a replacement for the link:https://docs.nvidia.com/openshell/latest/[official {openshell} documentation^].
+
+== Overview
+
+Hermes is an open-source AI agent from NousResearch. It supports skills, plugins, and memory. This phase runs it inside an {openshell} sandbox with a *standard* network policy - same tier as xref:05-opencode-agent.adoc[Phase 5] (OpenCode).
+
+[source]
+----
+openshell CLI
+    |
+    v
+OpenShell Gateway (Helm, StatefulSet)
+    |
+    v
+Sandbox Pod
+  +---------------------------+
+  | Hermes Agent              |
+  |   OPENAI_BASE_URL ------->|---> LiteLLM MaaS (inference)
+  |   HERMES_HOME             |
+  |   /sandbox/.hermes/       |---> RHOAI MLflow (tracing, optional)
+  |     config.yaml           |
+  |     skills/, memories/    |---> PyPI (skill installs)
+  +---------------------------+
+----
+
+== Prerequisites
+
+* {ocp-short} 4.19+ cluster with `oc` CLI logged in
+* Helm 3.x and `openshell` CLI installed
+* `.env` file at repo root with {litellm} credentials
+* Working directory: `demos/05-hermes/`
+
+== Installation
+
+=== Step 1: Deploy the {openshell} Gateway
+
+Skip this step if a gateway is already deployed from a previous phase.
+
+[source,bash]
+----
+bash install.sh
+----
+
+Or with TLS:
+
+[source,bash]
+----
+ENABLE_TLS=true bash install.sh
+----
+
+=== Step 2: Register the Gateway
+
+[source,bash]
+----
+openshell gateway add http://$(oc -n openshell get route openshell-gw -o jsonpath='{.spec.host}') \
+    --local --name openshift
+----
+
+=== Step 3: Create the Hermes Sandbox
+
+[source,bash]
+----
+bash setup-sandbox.sh
+----
+
+This creates a sandbox, installs Hermes, and injects {litellm} credentials from `.env`.
+
+=== Step 4: Connect and Run Hermes
+
+[source,bash]
+----
+openshell sandbox connect hermes-demo
+hermes
+----
+
+=== Step 5: Use a Pre-baked Image (Optional)
+
+Build and push the sandbox image for faster sandbox creation:
+
+[source,bash]
+----
+cd sandbox-image
+podman build --platform linux/amd64 \
+    -t quay.io/<your-org>/hermes-sandbox:latest \
+    -f Containerfile.openshell .
+podman push quay.io/<your-org>/hermes-sandbox:latest
+----
+
+Use the pre-baked image:
+
+[source,bash]
+----
+SANDBOX_IMAGE=quay.io/<your-org>/hermes-sandbox:latest bash setup-sandbox.sh
+----
+
+== Network Policy: Standard Tier
+
+Standard tier allows:
+
+* {litellm} MaaS (inference)
+* PyPI (Hermes skill/plugin installs)
+* GitHub (read-only)
+* NousResearch (model catalog, metadata)
+* {rhoai} MLflow (tracing)
+
+Blocks: direct AI APIs, arbitrary web access, GitHub write operations.
+
+Test the policy:
+
+[source,bash]
+----
+bash test-sandbox-security.sh
+----
+
+For a full comparison across security tiers, see xref:security.adoc[Sandbox Security Tiers].
+
+== Environment Variables
+
+These are set automatically by `setup-sandbox.sh` inside the sandbox:
+
+[cols="1,3", options="header"]
+|===
+| Variable | Purpose
+
+| `OPENAI_API_KEY`
+| {litellm} API key (from `.env`)
+
+| `OPENAI_BASE_URL`
+| {litellm} endpoint (from `.env`)
+
+| `HERMES_HOME`
+| Hermes config directory (`/sandbox/.hermes`)
+
+| `MLFLOW_TRACKING_URI`
+| MLflow server URL ({rhoai} external route)
+
+| `MLFLOW_TRACKING_TOKEN`
+| OCP Bearer token for {rhoai} auth
+|===
+
+== Verification
+
+[source,bash]
+----
+openshell sandbox list
+----
+
+Verify the sandbox is in `Ready` state and Hermes runs:
+
+[source,bash]
+----
+openshell sandbox connect hermes-demo
+hermes --version
+----
+
+== Troubleshooting
+
+*Hermes fails to start:*
+
+Check that `HERMES_HOME` is set and the config directory exists:
+
+[source,bash]
+----
+openshell sandbox exec --name hermes-demo -- ls -la /sandbox/.hermes/
+----
+
+*Skill installs fail:*
+
+Verify the network policy allows PyPI (`pypi.org` and `files.pythonhosted.org`):
+
+[source,bash]
+----
+openshell sandbox exec --name hermes-demo -- curl -s https://pypi.org/simple/requests/ | head -5
+----
+
+*Inference errors:*
+
+Check that {litellm} credentials are loaded and the endpoint is reachable:
+
+[source,bash]
+----
+openshell sandbox exec --name hermes-demo -- env | grep OPENAI
+----
+
+== Teardown
+
+[source,bash]
+----
+bash teardown.sh
+----
+
+To also remove the {agent-sandbox} operator:
+
+[source,bash]
+----
+bash teardown.sh --crd
+----
+
+== References
+
+* link:https://github.com/NousResearch/hermes-agent[Hermes Agent Repository^]
+* link:https://docs.nvidia.com/openshell/latest/[{openshell} Documentation^]
+
+== Next step
+
+Proceed to xref:security.adoc[Sandbox Security Tiers] for a cross-demo comparison of the three policy tiers.

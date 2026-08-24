@@ -1,0 +1,238 @@
+= Phase 7: Escape the Shell CTF
+
+An interactive Capture the Flag experience that demonstrates {openshell}'s security layers through a browser-based UI.
+
+TIP: All file paths and script commands in this guide are relative to the link:{repo-url}[agent-harness-in-a-box] repository root.
+
+IMPORTANT: This guide is not a replacement for the link:https://docs.nvidia.com/openshell/latest/[official {openshell} documentation^].
+
+== Overview
+
+This CTF deploys a web UI where you run commands side-by-side in an unprotected {ocp-short} pod versus an {openshell} sandbox. Each challenge highlights a security layer that {openshell} adds on top of what {ocp-short} already provides.
+
+{ocp-short} already prevents running as root via Security Context Constraints. This CTF shows what {openshell} adds *on top* of that baseline:
+
+[cols="1,1,1,1,1,1", options="header"]
+|===
+| Layer | Root User | Network | Filesystem | API Methods | Binary Control
+
+| *Kubernetes*
+| Yes (default)
+| Full access
+| Full access
+| All
+| Any binary
+
+| *{ocp-short}*
+| No (SCC)
+| Full access
+| Writable overlay
+| All
+| Any binary
+
+| *{openshell}*
+| No
+| Default-deny proxy
+| Landlock kernel LSM
+| L7 inspection
+| Per-binary rules
+|===
+
+== Prerequisites
+
+* {ocp-short} 4.19+ cluster with cluster-admin access
+* `oc` CLI configured and logged in
+* Helm 3.x and `openshell` CLI installed
+* `envsubst` available (from `gettext`)
+* Working directory: `demos/04-escape-the-shell/`
+
+== Installation
+
+=== Step 1: Deploy the Gateway and CTF UI
+
+[source,bash]
+----
+bash install.sh
+----
+
+Or with TLS:
+
+[source,bash]
+----
+ENABLE_TLS=true bash install.sh
+----
+
+This deploys the {openshell} gateway, builds the CTF UI image, and deploys the CTF UI pod in the `openshell-ctf` namespace.
+
+=== Step 2: Create the CTF Sandbox
+
+[source,bash]
+----
+bash setup-sandbox.sh
+----
+
+This creates a sandbox with the strict CTF policy.
+
+=== Step 3: Open the CTF UI
+
+[source,bash]
+----
+CTF_URL=$(oc -n openshell-ctf get route ctf-ui -o jsonpath='{.spec.host}')
+echo "https://$CTF_URL"
+----
+
+Open the URL in your browser.
+
+== The 5 Challenges
+
+=== Challenge 1: Data Exfiltration - Network Default-Deny
+
+Try to reach external endpoints. The CONNECT proxy blocks everything not in the policy.
+
+=== Challenge 2: Tool Smuggling - Binary Binding
+
+The inference endpoint allows `python3` but blocks `curl`. Same endpoint, different binary, different result.
+
+=== Challenge 3: Filesystem Escape - Landlock LSM
+
+World-writable paths like `/var/tmp` and `/dev/shm` are accessible on a regular {ocp-short} pod. Landlock blocks them at the kernel level.
+
+=== Challenge 4: API Abuse - L7 Read-Only
+
+The GitHub API allows GET requests (read) but blocks POST and DELETE (write). HTTP method enforcement at layer 7.
+
+=== Challenge 5: Live Lockdown - Policy Hot-Reload
+
+Switch between strict and permissive policies in real-time. Watch as httpbin goes from blocked to allowed and back.
+
+== CTF Policy Details
+
+The *strict* policy allows:
+
+* Inference endpoint (`*.redhatworkshops.io`) - `python3` and `node` only
+* GitHub API (`api.github.com`) - read-only, `curl` and `python3`
+* Filesystem: `/tmp`, `/sandbox`, `/workspace` writable; `/usr`, `/etc` read-only
+* Everything else is denied
+
+The *permissive* policy adds:
+
+* httpbin.org access (`curl` and `python3`) - used for the hot-reload demo
+
+== How the UI Works
+
+The CTF UI pod serves a FastAPI backend with a single-page web app:
+
+* *Unprotected*: Runs commands directly on the pod via `subprocess` (regular {ocp-short} container, restricted SCC, non-root)
+* *Protected*: Runs the same commands inside the {openshell} sandbox via `openshell sandbox exec`
+
+Flags are auto-captured when you demonstrate the security difference. For example, Challenge 1 triggers when any outbound request is blocked in the protected environment but succeeds in the unprotected one.
+
+For details on the CTF UI architecture and components, see xref:ctf-ui.adoc[CTF Web UI].
+
+== CLI-Based Testing
+
+If you prefer CLI over the web UI, run the security tests directly:
+
+[source,bash]
+----
+bash test-sandbox-security.sh
+----
+
+This tests all 5 challenge areas and prints a color-coded PASS/FAIL report.
+
+== Environment Variables
+
+[cols="1,2,2", options="header"]
+|===
+| Variable | Default | Purpose
+
+| `NAMESPACE`
+| `openshell-ctf`
+| {ocp-short} namespace for all resources
+
+| `OPENSHELL_VERSION`
+| (latest)
+| Pin a specific Helm chart version
+
+| `ENABLE_TLS`
+| `false`
+| Enable passthrough TLS via cert-manager
+|===
+
+== Verification
+
+[source,bash]
+----
+bash verify.sh
+----
+
+Check all components are running:
+
+[source,bash]
+----
+oc -n openshell-ctf get pods
+openshell sandbox list
+----
+
+== Troubleshooting
+
+*CTF UI pod in CrashLoopBackOff:*
+
+Check if the `openshell` CLI was installed correctly in the image:
+
+[source,bash]
+----
+oc -n openshell-ctf logs deployment/ctf-ui
+----
+
+*Sandbox commands time out:*
+
+Ensure the gateway is healthy and the sandbox is in Ready state:
+
+[source,bash]
+----
+bash verify.sh
+openshell sandbox list
+----
+
+*Policy switch fails:*
+
+Check that the policies ConfigMap is mounted correctly:
+
+[source,bash]
+----
+oc -n openshell-ctf exec deployment/ctf-ui -- ls /policies/
+----
+
+*Image build fails:*
+
+Check the BuildConfig logs:
+
+[source,bash]
+----
+oc -n openshell-ctf logs -f buildconfig/ctf-ui
+----
+
+== Teardown
+
+[source,bash]
+----
+bash teardown.sh
+----
+
+To also remove the {agent-sandbox} operator:
+
+[source,bash]
+----
+bash teardown.sh --crd
+----
+
+== References
+
+* xref:security.adoc[Sandbox Security Tiers]
+* xref:ctf-ui.adoc[CTF Web UI]
+* link:https://docs.nvidia.com/openshell/latest/[{openshell} Documentation^]
+
+== Next step
+
+Proceed to xref:08-hermes-agent.adoc[Phase 8: Hermes Agent].

@@ -1,0 +1,21 @@
+* xref:index.adoc[Overview]
+* xref:quick-start.adoc[Automated Setup]
+
+.Foundation
+* xref:01-prerequisites.adoc[Phase 1: Prerequisites]
+* xref:02-gateway-deployment.adoc[Phase 2: Gateway Deployment]
+* xref:03-first-sandbox.adoc[Phase 3: First Sandbox]
+
+.Agents & Authentication
+* xref:04-keycloak-oidc.adoc[Phase 4: {rhbk} OIDC]
+* xref:05-opencode-agent.adoc[Phase 5: OpenCode Agent]
+* xref:06-claude-code.adoc[Phase 6: Claude Code Agent]
+* xref:07-escape-the-shell.adoc[Phase 7: Escape the Shell CTF]
+* xref:08-hermes-agent.adoc[Phase 8: Hermes Agent]
+
+.Reference
+* xref:security.adoc[Sandbox Security Tiers]
+* xref:tls.adoc[Passthrough TLS]
+
+.Tools
+* xref:ctf-ui.adoc[CTF Web UI]

@@ -1,0 +1,207 @@
+= Phase 5: OpenCode Agent
+
+Run the OpenCode AI coding agent inside an {openshell} sandbox with {litellm} inference and optional MLflow tracing.
+
+TIP: All file paths and script commands in this guide are relative to the link:{repo-url}[agent-harness-in-a-box] repository root.
+
+IMPORTANT: This guide is not a replacement for the link:https://docs.nvidia.com/openshell/latest/[official {openshell} documentation^].
+
+== Overview
+
+OpenCode is a terminal-based AI coding agent that runs inside {openshell} sandboxes. This phase deploys it with {litellm} as the inference backend (Anthropic/OpenAI-compatible API) and optional {rhoai} MLflow tracing. The sandbox uses a *standard* network policy - a balanced tier for coding agents that allows inference, package registries, and read-only GitHub access.
+
+== Prerequisites
+
+* Phase 4 completed ({rhbk} OIDC authentication working)
+* `.env` file at repo root with {litellm} credentials (copy from `.env.example`)
+* Working directory: `demos/02-opencode-keycloak/`
+
+== Installation
+
+=== Step 1: Configure Credentials
+
+[source,bash]
+----
+cp ../../.env.example ../../.env
+----
+
+Edit `.env` with your {litellm} endpoint and API key:
+
+[source,bash]
+----
+LITELLM_URL=https://your-litellm-endpoint.example.com
+LITELLM_API_KEY=sk-...
+----
+
+=== Step 2: Create the OpenCode Sandbox
+
+The `setup-sandbox.sh` script creates a sandbox, uploads OpenCode config, and injects {litellm} and MLflow credentials:
+
+[source,bash]
+----
+bash setup-sandbox.sh
+----
+
+To use a pre-baked sandbox image with OpenCode already installed:
+
+[source,bash]
+----
+SANDBOX_IMAGE=quay.io/rcarrata/agentic-harness-openshell:opencode-v1 \
+    bash setup-sandbox.sh
+----
+
+=== Step 3: Connect and Run OpenCode
+
+Credentials are auto-loaded from `.profile` inside the sandbox:
+
+[source,bash]
+----
+openshell sandbox connect opencode-demo
+opencode
+----
+
+=== Step 4: Choose an LLM Model
+
+The OpenCode config at `config/opencode-config.json` defines all available {litellm} models. It is uploaded to `/workspace/.opencode/config.json` inside the sandbox.
+
+Available models:
+
+[cols="1,2,1,1", options="header"]
+|===
+| Model ID | Name | Reasoning | Context
+
+| `gpt-oss-120b`
+| GPT OSS 120B
+| Yes
+| 128K
+
+| `gemini-2.5-pro`
+| Gemini 2.5 Pro
+| Yes
+| 1M
+
+| `llama-scout-17b`
+| Llama Scout 17B
+| No
+| 128K
+
+| `qwen3-235b`
+| Qwen3 235B
+| Yes
+| 128K
+
+| `minimax-m2`
+| MiniMax M2
+| No
+| 128K
+|===
+
+Switch models inside a running OpenCode session by typing `/model` at the prompt.
+
+Change the default model in `config/opencode-config.json` before creating the sandbox:
+
+[source,json]
+----
+{
+  "model": "litellm/gemini-2.5-pro",
+  "small_model": "litellm/llama-scout-17b"
+}
+----
+
+=== Step 5: Build a Custom Sandbox Image (Optional)
+
+[source,bash]
+----
+cd sandbox-image
+podman build --platform linux/amd64 \
+    -t quay.io/<your-org>/opencode-sandbox:latest \
+    -f Containerfile.openshell .
+podman push quay.io/<your-org>/opencode-sandbox:latest
+----
+
+Then use it:
+
+[source,bash]
+----
+SANDBOX_IMAGE=quay.io/<your-org>/opencode-sandbox:latest bash setup-sandbox.sh
+----
+
+=== Step 6: Configure {rhoai} MLflow Tracing (Optional)
+
+`setup-sandbox.sh` configures MLflow automatically when an OCP token is available. For manual setup, see `overlays/mlflow/README.md`.
+
+Access the {rhoai} MLflow dashboard at the route exposed by {ocp-short} AI and navigate to the `openshell` workspace.
+
+== Network Policy: Standard Tier
+
+This sandbox uses a *standard* network policy. Unlike the strict policy from xref:03-first-sandbox.adoc[Phase 3], it opens access to package registries and code hosts that coding agents need:
+
+[source,bash]
+----
+# From inside the sandbox:
+curl https://registry.npmjs.org/express    # -> HTTP 200 (npm allowed)
+curl https://pypi.org/simple/requests/     # -> HTTP 200 (PyPI allowed)
+curl https://api.anthropic.com             # -> HTTP 403 (direct AI APIs blocked)
+curl https://example.com                   # -> HTTP 403 (not in policy)
+----
+
+GitHub is allowed but restricted to read-only access (L7 HTTP method inspection):
+
+[source,bash]
+----
+curl https://api.github.com/repos/NVIDIA/OpenShell    # -> HTTP 200 (GET allowed)
+curl -X POST https://api.github.com/repos/.../issues  # -> HTTP 403 (POST blocked)
+----
+
+For a full comparison across security tiers, see xref:security.adoc[Sandbox Security Tiers].
+
+== Verification
+
+[source,bash]
+----
+openshell sandbox list
+----
+
+Verify the sandbox is in `Ready` state and OpenCode can reach the {litellm} endpoint:
+
+[source,bash]
+----
+openshell sandbox connect opencode-demo
+opencode --version
+----
+
+Run the full security test suite:
+
+[source,bash]
+----
+bash test-sandbox-security.sh
+----
+
+== Troubleshooting
+
+*OpenCode hangs on first run:*
+
+Check that the {litellm} endpoint is reachable from inside the sandbox. The network policy must include the {litellm} hostname.
+
+*"OPENAI_API_KEY not set" error:*
+
+Credentials are loaded from `.profile`. If you connected manually instead of using `setup-sandbox.sh`, set them explicitly:
+
+[source,bash]
+----
+export OPENAI_API_KEY="your-litellm-key"
+export OPENAI_BASE_URL="https://your-litellm-endpoint.example.com/v1"
+----
+
+*npm packages fail to install inside sandbox:*
+
+Verify the network policy allows `registry.npmjs.org`. Use the pre-baked sandbox image to avoid runtime installs.
+
+== References
+
+* link:https://github.com/opencode-ai/opencode[OpenCode Repository^]
+* link:https://docs.nvidia.com/openshell/latest/[{openshell} Documentation^]
+
+== Next step
+
+Proceed to xref:06-claude-code.adoc[Phase 6: Claude Code Agent].

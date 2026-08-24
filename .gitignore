@@ -33,5 +33,9 @@ node_modules/
 *.log
 *.tmp
 
+# Antora build output
+www/
+.cache/antora/
+
 # Agent instructions (private per-developer)
 CLAUDE.md

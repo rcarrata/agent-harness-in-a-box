@@ -1,0 +1,380 @@
+= CTF Web UI
+
+Reference for the Escape the Shell interactive Capture the Flag web application, which demonstrates {openshell}'s security layers through a browser-based UI on {ocp-short}.
+
+TIP: All file paths and script commands in this guide are relative to the link:{repo-url}[agent-harness-in-a-box^] repository root.
+
+== Overview
+
+The CTF Web UI lets you run commands side-by-side in two environments and see what {openshell} blocks:
+
+* *Unprotected* - commands run directly on a regular {ocp-short} pod (restricted SCC, non-root)
+* *Protected* - the same commands run inside an {openshell} sandbox via `openshell sandbox exec`
+
+Flags are auto-captured when you demonstrate the security difference between the two environments.
+
+== Architecture
+
+[source,text]
+----
+OpenShift Namespace: openshell-ctf
++-------------------------------------------------------+
+|  OpenShell Gateway (StatefulSet, Helm chart)           |
+|   - Manages sandbox pod lifecycle                      |
+|   - CONNECT proxy enforces network policy              |
++-------------------------------------------------------+
+|  CTF UI Pod (Deployment, restricted SCC)               |
+|   - FastAPI backend (app.py)                           |
+|   - Single-file HTML SPA (index.html)                  |
+|   - "Unprotected" = commands run directly on this pod  |
+|   - "Protected" = commands via openshell sandbox exec  |
++-------------------------------------------------------+
+|  CTF Sandbox (managed by gateway)                      |
+|   - Landlock + CONNECT proxy + L7 inspection           |
+|   - CTF-specific policy (strict/permissive)            |
++-------------------------------------------------------+
+----
+
+== FastAPI Backend
+
+The CTF backend is a single Python file at `demos/04-escape-the-shell/ctf-ui/app.py`. It uses FastAPI with Pydantic models for request validation.
+
+=== API Endpoints
+
+[cols="1,1,3", options="header"]
+|===
+| Method | Path | Description
+
+| `GET`
+| `/`
+| Serves the single-page web UI (`index.html`)
+
+| `GET`
+| `/health`
+| Liveness probe, returns `{"status": "ok"}`
+
+| `GET`
+| `/api/challenges`
+| Returns all 5 challenge definitions with preset commands
+
+| `POST`
+| `/api/exec`
+| Executes a command in either environment
+
+| `GET`
+| `/api/sandbox-status`
+| Checks if the CTF sandbox is ready
+
+| `POST`
+| `/api/policy`
+| Switches between `strict` and `permissive` policies
+
+| `GET`
+| `/api/flags`
+| Returns current flag capture state and count
+
+| `POST`
+| `/api/flags/reset`
+| Resets all captured flags
+
+| `POST`
+| `/api/flags/\{flag_name}`
+| Captures a specific flag by name
+|===
+
+=== Execution Model
+
+The `/api/exec` endpoint accepts a JSON body with `command` and `environment` fields:
+
+[source,bash]
+----
+# Unprotected - runs via subprocess directly on the pod
+curl -X POST http://ctf-ui:8000/api/exec \
+  -H 'Content-Type: application/json' \
+  -d '{"command": "curl https://httpbin.org/get", "environment": "unprotected"}'
+
+# Protected - runs via openshell sandbox exec
+curl -X POST http://ctf-ui:8000/api/exec \
+  -H 'Content-Type: application/json' \
+  -d '{"command": "curl https://httpbin.org/get", "environment": "protected"}'
+----
+
+* *Unprotected* commands run via Python `subprocess` with a 15-second timeout
+* *Protected* commands run via `openshell sandbox exec --name ctf-sandbox` with a 30-second timeout
+* ANSI escape codes are stripped from output for clean rendering in the UI
+
+=== Environment Variables
+
+[cols="1,1,2", options="header"]
+|===
+| Variable | Default | Purpose
+
+| `SANDBOX_NAME`
+| `ctf-sandbox`
+| Name of the {openshell} sandbox to execute protected commands in
+
+| `POLICY_DIR`
+| `/policies`
+| Directory where policy YAML files are mounted (from ConfigMap)
+|===
+
+== The 5 Challenges
+
+Each challenge demonstrates a security layer by comparing behavior between the unprotected and protected environments.
+
+=== Challenge 1: Data Exfiltration (Network Default-Deny)
+
+Flag: `NETWORK_LOCKDOWN`
+
+An AI agent tries to reach external endpoints. In the unprotected environment, outbound network access is unrestricted. In the {openshell} sandbox, the CONNECT proxy blocks everything not declared in the policy.
+
+[source,bash]
+----
+# Both environments:
+curl -s -o /dev/null -w '%{http_code}' https://httpbin.org/get
+
+# Unprotected: 200 (success)
+# Protected:   403 (proxy denied)
+----
+
+=== Challenge 2: Tool Smuggling (Binary Binding)
+
+Flag: `BINARY_BINDING`
+
+The inference endpoint is allowed in the policy, but only for `python3` and `node`. An attacker who uses `curl` to reach the same endpoint finds it blocked - the proxy tracks which binary opened the connection.
+
+[source,bash]
+----
+# curl to inference endpoint:
+curl -s -o /dev/null -w '%{http_code}' https://maas-rhdp.apps.maas.redhatworkshops.io/health
+# Protected: 403 (curl not in allowed binaries)
+
+# python3 to same endpoint:
+python3 -c "import urllib.request; print(urllib.request.urlopen('https://...').status)"
+# Protected: 200 (python3 IS allowed)
+----
+
+=== Challenge 3: Filesystem Escape (Landlock LSM)
+
+Flag: `FILESYSTEM_ESCAPE`
+
+World-writable paths like `/var/tmp` and `/dev/shm` are accessible on a regular {ocp-short} pod. Landlock blocks them at the kernel level in the sandbox - only paths declared in the policy are reachable.
+
+[source,bash]
+----
+touch /var/tmp/exfiltrated       # Unprotected: OK    | Protected: Permission denied
+echo secret > /dev/shm/backdoor  # Unprotected: OK    | Protected: Permission denied
+touch /tmp/workspace-file        # Unprotected: OK    | Protected: OK (allowed path)
+----
+
+=== Challenge 4: API Abuse (L7 Read-Only)
+
+Flag: `L7_ENFORCEMENT`
+
+The GitHub API is allowed in the policy with `access: read-only`. The CONNECT proxy inspects HTTP methods at layer 7, allowing GET requests while blocking POST and DELETE.
+
+[source,bash]
+----
+# GET (read) - allowed:
+curl -s -o /dev/null -w '%{http_code}' https://api.github.com/zen
+# Protected: 200
+
+# POST (write) - blocked:
+curl -s -o /dev/null -w '%{http_code}' -X POST https://api.github.com/repos/test/test/issues
+# Protected: 403
+
+# DELETE (destroy) - blocked:
+curl -s -o /dev/null -w '%{http_code}' -X DELETE https://api.github.com/repos/test/test
+# Protected: 403
+----
+
+=== Challenge 5: Live Lockdown (Policy Hot-Reload)
+
+Flag: `POLICY_HOTRELOAD`
+
+Switch between strict and permissive policies in real-time via the UI's policy toggle. The strict policy blocks `httpbin.org`, the permissive policy allows it. The sandbox keeps running through the policy change.
+
+[source,bash]
+----
+# Switch to permissive (adds httpbin.org):
+curl -X POST http://ctf-ui:8000/api/policy \
+  -H 'Content-Type: application/json' \
+  -d '{"policy": "permissive"}'
+
+# Switch back to strict (removes httpbin.org):
+curl -X POST http://ctf-ui:8000/api/policy \
+  -H 'Content-Type: application/json' \
+  -d '{"policy": "strict"}'
+----
+
+== CTF Policies
+
+=== Strict policy (`policy-ctf-strict.yaml`)
+
+Allows the inference endpoint (`python3`/`node` only) and GitHub API (read-only, `curl`/`python3`). Everything else is denied.
+
+[source,yaml]
+----
+network_policies:
+
+  litellm_inference:
+    name: "LiteLLM Inference (python3/node only)"
+    endpoints:
+      - host: "*.redhatworkshops.io"
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: full
+    binaries:
+      - { path: /usr/bin/python3 }
+      - { path: /usr/bin/node }
+
+  github_api:
+    name: "GitHub API (read-only, curl+python3)"
+    endpoints:
+      - host: "api.github.com"
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+    binaries:
+      - { path: /usr/bin/curl }
+      - { path: /usr/bin/python3 }
+----
+
+=== Permissive policy (`policy-ctf-permissive.yaml`)
+
+Same as strict, plus `httpbin.org` access for `curl` and `python3`. Used in Challenge 5 to demonstrate hot-reload.
+
+[source,yaml]
+----
+  # Additional rule in permissive policy:
+  httpbin:
+    name: "HTTPBin (testing - hot-reload demo)"
+    endpoints:
+      - host: "httpbin.org"
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: full
+    binaries:
+      - { path: /usr/bin/curl }
+      - { path: /usr/bin/python3 }
+----
+
+== Flag Auto-Capture
+
+Flags are auto-captured by the frontend JavaScript when you demonstrate a security difference between the two environments. For example, Challenge 1 (Network Default-Deny) triggers when:
+
+* An outbound request succeeds in the *unprotected* environment (HTTP 200)
+* The same request is blocked in the *protected* environment (HTTP 403)
+
+The flag state is stored in memory on the backend and resets when the pod restarts or when you call the `/api/flags/reset` endpoint.
+
+== Deployment
+
+=== Quick start
+
+[source,bash]
+----
+cd demos/04-escape-the-shell
+
+# Deploy gateway + CTF UI
+bash install.sh
+
+# Create the CTF sandbox with strict policy
+bash setup-sandbox.sh
+
+# Open the UI
+CTF_URL=$(oc -n openshell-ctf get route ctf-ui -o jsonpath='{.spec.host}')
+echo "https://$CTF_URL"
+----
+
+With TLS:
+
+[source,bash]
+----
+ENABLE_TLS=true bash install.sh
+----
+
+=== Script reference
+
+[cols="1,3", options="header"]
+|===
+| Script | Purpose
+
+| `install.sh`
+| Deploy gateway, build CTF UI container image, deploy the CTF UI pod
+
+| `setup-sandbox.sh`
+| Create the CTF sandbox with the strict policy
+
+| `verify.sh`
+| Check that all components are running
+
+| `test-sandbox-security.sh`
+| CLI-based validation of all 5 challenge areas
+
+| `teardown.sh`
+| Remove everything (add `--crd` to also remove the operator)
+|===
+
+=== File structure
+
+[source,text]
+----
+demos/04-escape-the-shell/
+  install.sh
+  setup-sandbox.sh
+  verify.sh
+  test-sandbox-security.sh
+  teardown.sh
+  config/
+    policy-ctf-strict.yaml          # Strict policy
+    policy-ctf-permissive.yaml      # Adds httpbin for hot-reload
+  manifests/
+    route.yaml                      # Gateway Route
+    ctf-ui-deploy.yaml              # Deployment + Service + Route
+  ctf-ui/
+    app.py                          # FastAPI backend
+    index.html                      # Single-page web UI
+    requirements.txt                # Python dependencies
+    Containerfile                   # Container image build
+----
+
+=== CLI-based testing
+
+If you prefer the CLI over the web UI, run the security tests directly:
+
+[source,bash]
+----
+bash test-sandbox-security.sh
+----
+
+This tests all 5 challenge areas and prints a color-coded PASS/FAIL report, including the hot-reload test which switches policies automatically.
+
+== Troubleshooting
+
+*CTF UI pod in CrashLoopBackOff:* Check if the `openshell` CLI was installed correctly in the container image:
+
+[source,bash]
+----
+oc -n openshell-ctf logs deployment/ctf-ui
+----
+
+*Sandbox commands time out:* Verify the gateway is healthy and the sandbox is in Ready state:
+
+[source,bash]
+----
+bash verify.sh
+openshell sandbox list
+----
+
+*Policy switch fails:* Check that the policies ConfigMap is mounted at `/policies`:
+
+[source,bash]
+----
+oc -n openshell-ctf exec deployment/ctf-ui -- ls /policies/
+----
+
+xref:07-escape-the-shell.adoc[Back to Phase 7: Escape the Shell CTF]

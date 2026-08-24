@@ -14,7 +14,7 @@ SANDBOX_NAME="${1:-basic-sandbox}"
 
 export PATH="$HOME/bin:$PATH"
 
-LITELLM_URL="https://maas-rhdp.apps.maas.redhatworkshops.io"
+LITELLM_URL="${LITELLM_URL:-https://maas-rhdp.apps.maas.redhatworkshops.io}"
 
 PASS=0 FAIL=0 TOTAL=0
 track() { TOTAL=$((TOTAL + 1)); if [ "$1" -eq 0 ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); fi; }

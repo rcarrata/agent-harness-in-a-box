@@ -85,11 +85,48 @@ create_jwt_secret() {
     info "JWT signing secret created"
 }
 
-install_agent_sandbox_crd() {
-    step "Install Agent Sandbox CRD and controller"
-    oc apply -f \
-        https://github.com/kubernetes-sigs/agent-sandbox/releases/latest/download/sandbox.yaml
-    wait_for_pod_ready "agent-sandbox-system" "control-plane=controller-manager" 120
+install_agent_sandbox_operator() {
+    step "Install Red Hat Agent Sandbox operator"
+
+    if oc get crd sandboxes.agents.x-k8s.io &>/dev/null; then
+        info "Agent Sandbox CRD already present"
+        return 0
+    fi
+
+    cat <<'EOF' | oc apply -f -
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: agent-sandbox-operator
+  namespace: openshift-operators
+spec:
+  channel: preview-0.9
+  installPlanApproval: Automatic
+  name: agent-sandbox-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+EOF
+
+    info "Waiting for operator CSV to succeed..."
+    local csv=""
+    for i in $(seq 1 30); do
+        csv=$(oc -n openshift-operators get subscription agent-sandbox-operator \
+            -o jsonpath='{.status.installedCSV}' 2>/dev/null || true)
+        if [ -n "$csv" ]; then
+            break
+        fi
+        sleep 5
+    done
+
+    if [ -z "$csv" ]; then
+        error "Agent Sandbox operator CSV not found after 150s"
+        exit 1
+    fi
+
+    info "Waiting for $csv..."
+    oc -n openshift-operators wait --for=jsonpath='{.status.phase}'=Succeeded \
+        csv/"$csv" --timeout=300s
+    info "Agent Sandbox operator installed ($csv)"
 }
 
 create_openshell_namespace() {
@@ -364,6 +401,9 @@ EOF
            "value":{"name":"openshell-tls","mountPath":"/etc/openshell-tls","readOnly":true}}
         ]'
     fi
+
+    step "Set HOME to writable PVC path"
+    oc -n "$ns" set env statefulset/openshell HOME=/var/openshell
 
     step "Restart gateway with TLS"
     oc delete pod openshell-0 -n "$ns"
