@@ -1,5 +1,6 @@
 # Secrets and credentials
 .env
+.gitea-pats
 *.pem
 kubeconfig-*
 *.key

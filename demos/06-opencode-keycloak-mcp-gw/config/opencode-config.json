@@ -1,0 +1,73 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "litellm/gpt-oss-120b",
+  "small_model": "litellm/llama-scout-17b",
+  "enabled_providers": ["litellm"],
+  "plugin": ["@mlflow/opencode"],
+  "provider": {
+    "litellm": {
+      "api": "openai",
+      "name": "LiteLLM",
+      "env": ["OPENAI_API_KEY"],
+      "options": {
+        "baseURL": "${LITELLM_BASE_URL}"
+      },
+      "models": {
+        "gpt-oss-120b": {
+          "name": "GPT OSS 120B",
+          "tool_call": true,
+          "reasoning": true,
+          "attachment": false,
+          "temperature": true,
+          "limit": { "context": 131072, "output": 16384 },
+          "cost": { "input": 0, "output": 0 }
+        },
+        "gemini-2.5-pro": {
+          "name": "Gemini 2.5 Pro",
+          "tool_call": true,
+          "reasoning": true,
+          "attachment": false,
+          "temperature": true,
+          "limit": { "context": 1048576, "output": 65536 },
+          "cost": { "input": 0, "output": 0 }
+        },
+        "llama-scout-17b": {
+          "name": "Llama Scout 17B",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false,
+          "temperature": true,
+          "limit": { "context": 131072, "output": 8192 },
+          "cost": { "input": 0, "output": 0 }
+        },
+        "qwen3-235b": {
+          "name": "Qwen3 235B",
+          "tool_call": true,
+          "reasoning": true,
+          "attachment": false,
+          "temperature": true,
+          "limit": { "context": 131072, "output": 16384 },
+          "cost": { "input": 0, "output": 0 }
+        },
+        "minimax-m2": {
+          "name": "MiniMax M2",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false,
+          "temperature": true,
+          "limit": { "context": 131072, "output": 16384 },
+          "cost": { "input": 0, "output": 0 }
+        }
+      }
+    }
+  },
+  "mcpServers": {
+    "mcp-gateway": {
+      "type": "sse",
+      "url": "${MCP_GATEWAY_URL}/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MCP_GATEWAY_TOKEN}"
+      }
+    }
+  }
+}

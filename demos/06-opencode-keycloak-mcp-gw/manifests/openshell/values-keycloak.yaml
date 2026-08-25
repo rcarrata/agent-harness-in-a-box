@@ -1,0 +1,28 @@
+# OpenShell Helm values for Keycloak OIDC on OpenShift.
+#
+# The OIDC issuer uses the in-cluster service hostname. Tokens carry this
+# hostname as the `iss` claim regardless of how they were obtained.
+#
+# For CLI login, keep a port-forward running:
+#   oc -n openshell-keycloak port-forward svc/keycloak 9090:80
+
+# OpenShift-specific overrides
+pkiInitJob:
+  enabled: false
+
+podSecurityContext:
+  fsGroup: null
+
+securityContext:
+  runAsUser: null
+
+server:
+  disableTls: true
+
+  oidc:
+    issuer: "http://keycloak.openshell-keycloak.svc.cluster.local/realms/openshell"
+    audience: "openshell-cli"
+    jwksTtl: 60
+    rolesClaim: "realm_access.roles"
+    adminRole: "openshell-admin"
+    userRole: "openshell-user"

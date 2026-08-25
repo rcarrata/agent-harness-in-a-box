@@ -1,0 +1,234 @@
+= Phase 9: OpenCode + MCP Gateway
+
+Run OpenCode or Claude Code inside an {openshell} sandbox on {ocp-short} with access to Gitea private repositories through the MCP Gateway.
+
+TIP: All file paths and script commands in this guide are relative to the link:{repo-url}[agent-harness-in-a-box] repository root.
+
+IMPORTANT: This guide is not a replacement for the link:https://docs.nvidia.com/openshell/latest/[official {openshell} documentation^].
+
+== Overview
+
+This phase extends xref:05-opencode-agent.adoc[Phase 5] by connecting the agent to a Gitea instance through the link:https://docs.kuadrant.io/dev/mcp-gateway/[MCP Gateway^]. The agent can list repositories, read files, create issues, and manage pull requests - all routed through a centralized gateway with per-user RBAC.
+
+[source]
+----
+openshell CLI
+    |
+    v
+OpenShell Gateway (Helm, StatefulSet)
+    |
+    v
+Sandbox Pod
+  +-----------------------------------+
+  | OpenCode / Claude Code            |
+  |   OPENAI_BASE_URL ------->|-------> LiteLLM MaaS (inference)
+  |   MCP_GATEWAY_URL ------->|-------> MCP Gateway (Kuadrant)
+  |                           |              |
+  |                           |              v
+  |                           |         Gitea MCP Server
+  |                           |              |
+  |                           |              v
+  |                           |         Gitea (private repos)
+  +-----------------------------------+
+----
+
+== RBAC Model
+
+The MCP Gateway uses {rhbk} (realm `mcp`) for tool-level authorization. Two demo users show different access levels:
+
+[cols="1,2,2", options="header"]
+|===
+| | user1 | user2
+
+| *Gitea role*
+| Owner (push, create issues, manage repos)
+| Reader (list repos, read files only)
+
+| *MCP tool roles*
+| All `gitea_*` tools
+| Read-only `gitea_*` tools only
+
+| *How it works*
+| AuthPolicy replaces JWT with user1's Gitea PAT
+| AuthPolicy replaces JWT with user2's Gitea PAT
+|===
+
+The AuthPolicy on the Gitea HTTPRoute intercepts each MCP tool call, validates the Keycloak JWT, checks the user's `resource_access` roles for the requested tool, and replaces the Authorization header with the user's personal Gitea PAT. Each agent gets different Gitea permissions based on who logged in.
+
+== Prerequisites
+
+* Phases 1-5 completed (gateway running, CLI configured, {rhbk} OIDC)
+* MCP Gateway deployed on the cluster (from the link:https://rh-aiservices-bu.github.io/mcp-gateway-guide/[MCP Gateway Guide^])
+* `oc` CLI authenticated as cluster-admin
+* Working directory: `demos/06-opencode-keycloak-mcp-gw/`
+
+== Installation
+
+=== Step 1: Deploy Everything
+
+The install script deploys Gitea, registers the Gitea MCP server with the MCP Gateway, updates the Keycloak realm with tool roles, and sets up the {openshell} gateway with OIDC.
+
+[source,bash]
+----
+bash install.sh
+----
+
+Or with TLS:
+
+[source,bash]
+----
+ENABLE_TLS=true bash install.sh
+----
+
+=== Step 2: Create a Sandbox (OpenCode)
+
+[source,bash]
+----
+bash setup-sandbox.sh --user user1 --agent opencode
+----
+
+This creates a sandbox `opencode-mcp-demo` with:
+
+* Standard network policy extended with MCP Gateway, Keycloak, and Gitea endpoints
+* OpenCode configured with the MCP Gateway as an MCP server
+* A Keycloak JWT for user1 injected as `MCP_GATEWAY_TOKEN`
+
+=== Step 3: Create a Sandbox (Claude Code)
+
+To use Claude Code instead:
+
+[source,bash]
+----
+bash setup-sandbox.sh --user user1 --agent claude
+----
+
+This creates a sandbox `claude-mcp-demo` with a `.mcp.json` file pointing to the MCP Gateway.
+
+=== Step 4: Show RBAC Contrast
+
+Create a second sandbox with user2 (read-only):
+
+[source,bash]
+----
+bash setup-sandbox.sh --user user2 --agent opencode
+----
+
+Now user1's sandbox can create issues and push code, while user2's sandbox can only list and read repositories.
+
+=== Step 5: Connect and Use
+
+[source,bash]
+----
+openshell sandbox connect opencode-mcp-demo
+opencode
+----
+
+Ask the agent to list Gitea repos or create an issue - the MCP Gateway tools are available as `gitea_list_user_repos`, `gitea_create_issue`, etc.
+
+== Token Refresh
+
+Keycloak tokens expire after 30 minutes. A refresh script is created inside the sandbox:
+
+[source,bash]
+----
+source /sandbox/refresh-mcp-token.sh
+----
+
+== Network Policy
+
+The standard policy from xref:05-opencode-agent.adoc[Phase 5] is extended with three additional endpoints:
+
+[cols="1,2,1", options="header"]
+|===
+| Endpoint | Purpose | Access
+
+| `mcp.<apps-domain>`
+| MCP Gateway (tool calls)
+| Full
+
+| `keycloak-mcp-test.<apps-domain>`
+| Token refresh (Keycloak mcp realm)
+| Full
+
+| `gitea-gitea.<apps-domain>`
+| Direct git operations (clone, push)
+| Full
+|===
+
+== Verification
+
+[source,bash]
+----
+bash verify.sh
+----
+
+== Troubleshooting
+
+*MCP tools not found:*
+
+Check the MCPServerRegistration status. The MCP Gateway broker may need a restart after registering a new server:
+
+[source,bash]
+----
+oc get mcpsr -A
+oc -n mcp-gateway rollout restart deployment/mcp-gateway
+----
+
+*Token expired (401 Unauthorized):*
+
+Refresh the token inside the sandbox:
+
+[source,bash]
+----
+source /sandbox/refresh-mcp-token.sh
+----
+
+*Gitea unreachable:*
+
+Verify Gitea is running and the route resolves:
+
+[source,bash]
+----
+oc -n gitea get pods
+oc -n gitea get route gitea
+----
+
+*Tool access denied (403):*
+
+The user does not have the required tool role in Keycloak. Check `resource_access` in the JWT:
+
+[source,bash]
+----
+echo "$MCP_GATEWAY_TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | python3 -m json.tool
+----
+
+== Teardown
+
+[source,bash]
+----
+bash teardown.sh
+----
+
+To also remove Gitea:
+
+[source,bash]
+----
+bash teardown.sh --gitea
+----
+
+To also remove the {agent-sandbox} operator:
+
+[source,bash]
+----
+bash teardown.sh --gitea --crd
+----
+
+== References
+
+* link:https://docs.kuadrant.io/dev/mcp-gateway/[MCP Gateway Documentation^]
+* link:https://gitea.com/gitea/gitea-mcp-server[Gitea MCP Server^]
+* link:https://docs.nvidia.com/openshell/latest/[{openshell} Documentation^]
+
+== Next step
+
+Proceed to xref:10-hermes-mcp-gateway.adoc[Phase 10: Hermes + MCP Gateway].

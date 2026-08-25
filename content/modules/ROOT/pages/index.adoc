@@ -75,6 +75,21 @@ You also need:
 | xref:08-hermes-agent.adoc[8]
 |===
 
+=== MCP Gateway Integration
+
+[cols="1,3,1", options="header"]
+|===
+| Demo | Description | Phase
+
+| xref:09-opencode-mcp-gateway.adoc[6. OpenCode + MCP Gateway]
+| OpenCode/Claude Code with Gitea private repos via MCP Gateway, per-user RBAC
+| xref:09-opencode-mcp-gateway.adoc[9]
+
+| xref:10-hermes-mcp-gateway.adoc[7. Hermes + MCP Gateway]
+| Hermes agent with MCP Gateway tools, default read-only access
+| xref:10-hermes-mcp-gateway.adoc[10]
+|===
+
 == Automated Setup
 
 For end-to-end deployment using install scripts, see the xref:quick-start.adoc[Automated Setup] page.

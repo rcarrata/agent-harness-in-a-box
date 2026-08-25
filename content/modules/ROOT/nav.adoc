@@ -13,6 +13,10 @@
 * xref:07-escape-the-shell.adoc[Phase 7: Escape the Shell CTF]
 * xref:08-hermes-agent.adoc[Phase 8: Hermes Agent]
 
+.MCP Gateway Integration
+* xref:09-opencode-mcp-gateway.adoc[Phase 9: OpenCode + MCP Gateway]
+* xref:10-hermes-mcp-gateway.adoc[Phase 10: Hermes + MCP Gateway]
+
 .Reference
 * xref:security.adoc[Sandbox Security Tiers]
 * xref:tls.adoc[Passthrough TLS]

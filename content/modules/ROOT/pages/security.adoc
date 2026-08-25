@@ -67,7 +67,7 @@ id       # -> uid=sandbox gid=sandbox
 
 == Policy Tiers
 
-The demos in this guide use three policy tiers. Each tier is a YAML file that declares which network endpoints, binaries, and filesystem paths are allowed.
+The demos in this guide use four policy tiers. Each tier is a YAML file that declares which network endpoints, binaries, and filesystem paths are allowed.
 
 [cols="1,2,2", options="header"]
 |===
@@ -80,6 +80,10 @@ The demos in this guide use three policy tiers. Each tier is a YAML file that de
 | *Standard*
 | Everyday coding agent work with balanced security
 | Inference, package registries (npm/PyPI), GitHub (read-only), MLflow tracing.
+
+| *Standard + MCP*
+| Agents with MCP Gateway access (Gitea, risk tools)
+| Everything in Standard plus MCP Gateway, Keycloak MCP realm, and Gitea endpoints.
 
 | *Permissive*
 | Trusted coding agents (Claude Code) needing broad access
@@ -397,6 +401,14 @@ The script runs through network, binary binding, filesystem, and process tests a
 | 5. Hermes Agent
 | Standard
 | Autonomous agent with balanced security
+
+| 6. OpenCode + MCP Gateway
+| Standard + MCP
+| Standard policy extended with MCP Gateway, Keycloak, and Gitea endpoints
+
+| 7. Hermes + MCP Gateway
+| Standard + MCP
+| Same as above, with Hermes-specific binary bindings
 |===
 
 xref:index.adoc[Back to Overview]
