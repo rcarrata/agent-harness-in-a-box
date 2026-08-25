@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshell-keycloak
+  labels:
+    app: keycloak
+    demo: opencode-keycloak

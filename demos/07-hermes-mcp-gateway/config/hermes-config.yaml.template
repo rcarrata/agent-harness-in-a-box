@@ -1,0 +1,196 @@
+# Hermes Agent config for OpenShell sandbox with MCP Gateway.
+# MCP Gateway provides Gitea tools with RBAC via Keycloak.
+# Network policy restricts outbound to: LiteLLM, PyPI, MCP Gateway, Keycloak, Gitea.
+
+model:
+  default: ${LITELLM_MODEL}
+  provider: custom
+  base_url: ${LITELLM_BASE_URL}
+  api_key: ${LITELLM_API_KEY}
+
+custom_providers:
+  - name: litellm
+    base_url: ${LITELLM_BASE_URL}
+    api_key: ${LITELLM_API_KEY}
+    model: ${LITELLM_MODEL}
+
+toolsets:
+  - hermes-cli
+
+plugins:
+  enabled: []
+
+# --- Agent behavior ---
+agent:
+  max_turns: 150
+  gateway_timeout: 1800
+  api_max_retries: 3
+  tool_use_enforcement: auto
+  task_completion_guidance: true
+  parallel_tool_call_guidance: true
+  environment_probe: true
+  environment_hint: |
+    You are running inside an OpenShell sandbox on OpenShift.
+    Home directory: /sandbox (writable)
+    Hermes data: /sandbox/.hermes (writable)
+    System paths (/usr, /lib, /etc): read-only via Landlock
+    Network: outbound restricted to LiteLLM, PyPI, MCP Gateway, Keycloak, Gitea.
+    No direct internet access. Use LiteLLM for inference.
+    MCP Gateway: You have access to Gitea tools via the MCP Gateway.
+    Use these tools to list repos, read files, create issues, etc.
+    Token refresh: source /sandbox/refresh-mcp-token.sh
+  coding_context: auto
+  verify_on_stop: auto
+  gateway_timeout_warning: 900
+  clarify_timeout: 600
+  image_input_mode: auto
+  disabled_toolsets:
+    - web
+    - browser
+    - image_gen
+    - tts
+    - computer_use
+    - video
+    - video_gen
+    - x_search
+    - homeassistant
+    - spotify
+    - yuanbao
+
+# --- Terminal (shell access inside sandbox) ---
+terminal:
+  backend: local
+  timeout: 180
+  persistent_shell: true
+  auto_source_bashrc: true
+  cwd: /workspace
+  home_mode: auto
+
+# --- Display ---
+display:
+  compact: false
+  streaming: true
+  show_reasoning: false
+  inline_diffs: true
+  file_mutation_verifier: true
+  interface: cli
+  personality: ""
+
+# --- Streaming ---
+streaming:
+  enabled: true
+
+# --- Code execution ---
+code_execution:
+  mode: project
+
+# --- Sub-agent delegation ---
+delegation:
+  inherit_mcp_toolsets: true
+  max_iterations: 50
+  max_concurrent_children: 3
+  max_spawn_depth: 1
+  orchestrator_enabled: true
+
+# --- Context compression (long conversations) ---
+compression:
+  enabled: true
+  threshold: 0.5
+  target_ratio: 0.2
+  protect_last_n: 20
+  protect_first_n: 3
+
+context:
+  engine: compressor
+
+# --- Tool safety ---
+tool_output:
+  max_bytes: 50000
+  max_lines: 2000
+  max_line_length: 2000
+
+tool_loop_guardrails:
+  warnings_enabled: true
+  hard_stop_enabled: false
+  warn_after:
+    exact_failure: 2
+    same_tool_failure: 3
+    idempotent_no_progress: 2
+  hard_stop_after:
+    exact_failure: 5
+    same_tool_failure: 8
+    idempotent_no_progress: 5
+
+tools:
+  tool_search:
+    enabled: auto
+    threshold_pct: 10
+    search_default_limit: 5
+    max_search_limit: 20
+
+# --- Memory (local, no mem0) ---
+memory:
+  memory_enabled: true
+  user_profile_enabled: true
+  memory_char_limit: 2200
+  user_char_limit: 1375
+  provider: local
+
+# --- Task management ---
+goals:
+  max_turns: 20
+
+kanban:
+  auto_decompose: true
+  auto_decompose_per_tick: 3
+
+# --- Skills ---
+skills:
+  external_dirs: []
+  template_vars: true
+  inline_shell: false
+
+# --- Curator (memory maintenance) ---
+curator:
+  enabled: true
+  interval_hours: 168
+  min_idle_hours: 2
+  stale_after_days: 30
+
+# --- LSP (code intelligence) ---
+lsp:
+  enabled: true
+  wait_mode: document
+  wait_timeout: 5.0
+  install_strategy: auto
+
+# --- NousResearch model catalog ---
+model_catalog:
+  enabled: true
+  url: https://hermes-agent.nousresearch.com/docs/api/model-catalog.json
+  ttl_hours: 1
+
+# --- Security ---
+security:
+  redact_secrets: true
+  tirith_enabled: true
+
+approvals:
+  mode: manual
+  timeout: 60
+
+# --- Logging ---
+logging:
+  level: INFO
+  max_size_mb: 5
+  backup_count: 3
+
+file_read_max_chars: 100000
+
+# --- MCP Servers (injected by setup-sandbox.sh) ---
+mcp_servers:
+  mcp-gateway:
+    url: ${MCP_GATEWAY_URL}/mcp
+    transport: streamable_http
+    headers:
+      Authorization: "Bearer ${MCP_GATEWAY_TOKEN}"

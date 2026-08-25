@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "mcp-gateway": {
+      "type": "url",
+      "url": "${MCP_GATEWAY_URL}/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MCP_GATEWAY_TOKEN}"
+      }
+    }
+  }
+}

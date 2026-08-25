@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitea-mcp-server
+  namespace: mcp-test
+  labels:
+    app: gitea-mcp-server
+spec:
+  selector:
+    app: gitea-mcp-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP

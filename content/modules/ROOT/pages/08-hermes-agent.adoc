@@ -209,4 +209,4 @@ bash teardown.sh --crd
 
 == Next step
 
-Proceed to xref:security.adoc[Sandbox Security Tiers] for a cross-demo comparison of the three policy tiers.
+Proceed to xref:09-opencode-mcp-gateway.adoc[Phase 9: OpenCode + MCP Gateway] to connect agents to Gitea private repos via the MCP Gateway.

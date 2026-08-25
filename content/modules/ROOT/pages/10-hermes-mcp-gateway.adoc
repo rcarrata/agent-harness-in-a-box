@@ -1,0 +1,192 @@
+= Phase 10: Hermes + MCP Gateway
+
+Run the link:https://github.com/NousResearch/hermes-agent[Hermes AI agent^] inside an {openshell} sandbox on {ocp-short} with access to Gitea private repositories through the MCP Gateway.
+
+TIP: All file paths and script commands in this guide are relative to the link:{repo-url}[agent-harness-in-a-box] repository root.
+
+IMPORTANT: This guide is not a replacement for the link:https://docs.nvidia.com/openshell/latest/[official {openshell} documentation^].
+
+== Overview
+
+This phase extends xref:08-hermes-agent.adoc[Phase 8] by connecting Hermes to the MCP Gateway. Hermes uses the `mcp_servers` config to access Gitea tools via Streamable HTTP. By default, the sandbox runs as user2 (read-only) to demonstrate restricted access.
+
+[source]
+----
+openshell CLI
+    |
+    v
+OpenShell Gateway (Helm, StatefulSet)
+    |
+    v
+Sandbox Pod
+  +-----------------------------------+
+  | Hermes Agent                      |
+  |   OPENAI_BASE_URL ------->|-------> LiteLLM MaaS (inference)
+  |   mcp_servers:             |
+  |     mcp-gateway: -------->|-------> MCP Gateway (Kuadrant)
+  |                           |              |
+  |   /sandbox/.hermes/       |              v
+  |     config.yaml           |         Gitea MCP Server
+  |     skills/, memories/    |              |
+  |                           |              v
+  |                           |         Gitea (private repos)
+  +-----------------------------------+
+----
+
+== RBAC Model
+
+Same model as xref:09-opencode-mcp-gateway.adoc[Phase 9]. The `--user` flag selects which Keycloak identity the agent uses:
+
+[cols="1,2,2", options="header"]
+|===
+| | user1 | user2 (default)
+
+| *Gitea access*
+| Full (push, issues, PRs)
+| Read-only (list repos, read files)
+
+| *MCP tools*
+| All `gitea_*` tools
+| `gitea_list_user_repos`, `gitea_get_file_content`, `gitea_search_repos`, etc.
+
+| *Use case*
+| Autonomous coding agent
+| Research and documentation agent
+|===
+
+== Prerequisites
+
+* {ocp-short} 4.19+ cluster with `oc` CLI logged in
+* MCP Gateway deployed on the cluster
+* Helm 3.x and `openshell` CLI installed
+* `.env` file at repo root with {litellm} credentials
+* Working directory: `demos/07-hermes-mcp-gateway/`
+
+== Installation
+
+=== Step 1: Deploy Everything
+
+[source,bash]
+----
+bash install.sh
+----
+
+This deploys Gitea, registers the Gitea MCP server, updates Keycloak, and installs a standalone {openshell} gateway (no OIDC auth).
+
+Or with TLS:
+
+[source,bash]
+----
+ENABLE_TLS=true bash install.sh
+----
+
+=== Step 2: Create the Hermes Sandbox
+
+[source,bash]
+----
+bash setup-sandbox.sh --user user2
+----
+
+For full Gitea access:
+
+[source,bash]
+----
+bash setup-sandbox.sh --user user1
+----
+
+=== Step 3: Connect and Run Hermes
+
+[source,bash]
+----
+openshell sandbox connect hermes-mcp-demo
+hermes
+----
+
+Ask Hermes to list repositories, read files from Gitea, or create issues (if running as user1).
+
+== Hermes MCP Configuration
+
+The `mcp_servers` section in `config.yaml` connects Hermes to the MCP Gateway:
+
+[source,yaml]
+----
+mcp_servers:
+  mcp-gateway:
+    url: https://mcp.<apps-domain>/mcp
+    transport: streamable_http
+    headers:
+      Authorization: "Bearer <keycloak-jwt>"
+----
+
+Hermes discovers all tools registered with the MCP Gateway (gitea_, risk_, test1_ prefixes) and can call them within tool-use conversations.
+
+== Network Policy
+
+The standard policy from xref:08-hermes-agent.adoc[Phase 8] is extended with MCP Gateway, Keycloak, and Gitea endpoints. See xref:09-opencode-mcp-gateway.adoc[Phase 9] for the full endpoint table.
+
+== Verification
+
+[source,bash]
+----
+bash verify.sh
+----
+
+Verify the sandbox is in `Ready` state and Hermes can reach the MCP Gateway:
+
+[source,bash]
+----
+openshell sandbox connect hermes-mcp-demo
+hermes --version
+----
+
+== Troubleshooting
+
+*Hermes fails to discover MCP tools:*
+
+Check that `mcp_servers` is in the config and the token is valid:
+
+[source,bash]
+----
+openshell sandbox exec --name hermes-mcp-demo -- cat /sandbox/.hermes/config.yaml | tail -10
+openshell sandbox exec --name hermes-mcp-demo -- env | grep MCP_GATEWAY
+----
+
+*Token expired:*
+
+[source,bash]
+----
+openshell sandbox exec --name hermes-mcp-demo -- source /sandbox/refresh-mcp-token.sh
+----
+
+*Gitea MCP server not registered:*
+
+[source,bash]
+----
+oc get mcpsr -A
+oc -n mcp-gateway rollout restart deployment/mcp-gateway
+----
+
+== Teardown
+
+[source,bash]
+----
+bash teardown.sh
+----
+
+To also remove Gitea and the {agent-sandbox} operator:
+
+[source,bash]
+----
+bash teardown.sh --gitea --crd
+----
+
+== References
+
+* link:https://github.com/NousResearch/hermes-agent[Hermes Agent Repository^]
+* link:https://docs.kuadrant.io/dev/mcp-gateway/[MCP Gateway Documentation^]
+* link:https://gitea.com/gitea/gitea-mcp-server[Gitea MCP Server^]
+* link:https://docs.nvidia.com/openshell/latest/[{openshell} Documentation^]
+
+== Next step
+
+Proceed to xref:security.adoc[Sandbox Security Tiers] for a cross-demo comparison of all policy tiers.

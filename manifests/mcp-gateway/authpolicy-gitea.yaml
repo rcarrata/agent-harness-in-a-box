@@ -1,0 +1,37 @@
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: gitea-mcp-authz-policy
+  namespace: mcp-test
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: gitea-mcp-server-route
+  rules:
+    authentication:
+      anonymous:
+        anonymous: {}
+        when:
+        - predicate: '!request.headers.exists(h, h == ''x-mcp-toolname'')'
+      keycloak:
+        jwt:
+          issuerUrl: https://keycloak-mcp-test.__OCP_APPS_DOMAIN__/realms/mcp
+        when:
+        - predicate: request.headers.exists(h, h == 'x-mcp-toolname')
+    authorization: {}
+    response:
+      success:
+        headers:
+          authorization:
+            plain:
+              selector: "token {auth.identity.gitea_pat}"
+            when:
+            - predicate: "has(auth.identity.gitea_pat) && auth.identity.gitea_pat != ''"
+      unauthorized:
+        body:
+          value: |
+            {
+              "error": "Forbidden",
+              "message": "MCP Tool Access denied: Insufficient permissions for this tool."
+            }
